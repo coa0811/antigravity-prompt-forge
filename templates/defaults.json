@@ -1,0 +1,121 @@
+{
+  "code": {
+    "id": "code",
+    "name": "编码与调试",
+    "description": "软件实现、重构、Bug 排查、脚本编写与测试验证。",
+    "keywords": [
+      "代码", "重构", "修复", "实现", "函数", "类", "接口", "脚本", "测试", "报错", "调试",
+      "bug", "fix", "refactor", "implement", "debug", "test", "lint", "build", "api", "cli", "hook"
+    ],
+    "sections": [
+      "任务目标（Goal）",
+      "目标文件与范围（Scope & Target Files）",
+      "技术约束与边界（Constraints & Non-Goals）",
+      "关键实现细节（Implementation Details）",
+      "验证与验收标准（Verification & Acceptance）"
+    ],
+    "clarifying_focus": [
+      "改动的目标文件、模块入口或受影响范围是否明确",
+      "是否存在性能、兼容性、接口签名或只读边界限制",
+      "期望的测试/验证方式（单测、构建命令、冒烟测试）"
+    ],
+    "verification_hints": [
+      "指定可执行的测试命令或静态检查命令（退出码为 0）",
+      "明确改动前后行为对比与关键边界条件验证"
+    ]
+  },
+  "plan": {
+    "id": "plan",
+    "name": "架构与方案设计",
+    "description": "技术方案对比、系统架构设计、迁移路线与实施计划。",
+    "keywords": [
+      "架构", "方案", "设计", "规划", "计划", "选型", "权衡", "迁移", "拆分", "路线",
+      "design", "architecture", "plan", "proposal", "spec", "tradeoff", "roadmap", "rfc"
+    ],
+    "sections": [
+      "背景与核心目标（Context & Objective）",
+      "约束与假设（Constraints & Assumptions）",
+      "候选方案与权衡维度（Options & Tradeoffs）",
+      "分阶段实施路径（Milestones & Execution Plan）",
+      "风险点与回滚/验证机制（Risks & Verification）"
+    ],
+    "clarifying_focus": [
+      "当前优先目标（简洁优先、可扩展性、上线速度还是稳定性）",
+      "技术栈限制、部署环境或不可破坏的现有契约",
+      "是否只需要设计方案还是需要随后直接落地实施"
+    ],
+    "verification_hints": [
+      "明确每个里程碑的可检查交付物与评审门禁",
+      "列出关键风险的触发信号与回滚条件"
+    ]
+  },
+  "research": {
+    "id": "research",
+    "name": "调研与深度分析",
+    "description": "文献检索、技术/科学问题调查、竞品或方案对比与证据综合。",
+    "keywords": [
+      "调研", "研究", "对比", "评估", "分析", "文献", "论文", "检索", "证据", "原理", "机制",
+      "research", "compare", "benchmark", "survey", "literature", "evaluate", "analysis", "study"
+    ],
+    "sections": [
+      "核心研究问题（Research Questions）",
+      "对比维度与评估指标（Criteria & Metrics）",
+      "信息来源与证据要求（Sources & Evidence Standards）",
+      "排除范围与边界条件（Out of Scope）",
+      "预期交付格式（Deliverable Format）"
+    ],
+    "clarifying_focus": [
+      "对比/调研的具体维度（精度、成本、通量、可维护性或时效性）",
+      "需要优先采信或排除的数据源/文献时间范围",
+      "输出形式偏好（结论矩阵、深度报告还是可执行推荐）"
+    ],
+    "verification_hints": [
+      "要求关键结论附带明确引用来源、实验/实测依据与不确定性边界",
+      "禁止编造不存在的引用、数据或路径"
+    ]
+  },
+  "doc": {
+    "id": "doc",
+    "name": "文档与内容创作",
+    "description": "技术文档、说明手册、汇报材料、邮件/总结或结构化文案撰写。",
+    "keywords": [
+      "文档", "写作", "总结", "报告", "手册", "邮件", "汇报", "readme", "docx", "pdf", "ppt",
+      "doc", "write", "draft", "summary", "report", "guide", "slides", "copy"
+    ],
+    "sections": [
+      "受众与使用场景（Audience & Purpose）",
+      "核心信息与大纲结构（Key Messages & Outline）",
+      "事实依据与引用来源（Grounding Sources）",
+      "语气风格与篇幅约束（Tone & Length）",
+      "交付格式与校对标准（Format & Quality Checks）"
+    ],
+    "clarifying_focus": [
+      "目标读者背景（决策层、技术人员还是终端用户）与阅读场景",
+      "期望输出载体（Markdown、Word/PDF 脚本生成还是简短消息）",
+      "必须包含或严格回避的术语、数据与篇幅限制"
+    ],
+    "verification_hints": [
+      "核对事实与引用路径一致性，无虚构数据",
+      "检查结构完整性、可读性与格式渲染正确性"
+    ]
+  },
+  "general": {
+    "id": "general",
+    "name": "通用任务增强",
+    "description": "通用指令结构化补全，明确目标、上下文、约束与完成标准。",
+    "keywords": [],
+    "sections": [
+      "明确目标（Objective）",
+      "上下文与输入条件（Context & Inputs）",
+      "约束与边界（Constraints）",
+      "期望输出与完成标准（Expected Output & Done Criteria）"
+    ],
+    "clarifying_focus": [
+      "任务最终要产出的具体结果或可验证状态是什么",
+      "是否有隐含的工具、环境、时间或格式限制"
+    ],
+    "verification_hints": [
+      "给出清晰的完成判据与关键检查点"
+    ]
+  }
+}

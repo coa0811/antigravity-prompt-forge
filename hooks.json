@@ -1,0 +1,12 @@
+{
+  "prompt-forge-pre-invocation": {
+    "enabled": true,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "./scripts/run_python.sh ./scripts/prompt_forge_hook.py",
+        "timeout": 5
+      }
+    ]
+  }
+}
