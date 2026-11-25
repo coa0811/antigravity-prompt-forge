@@ -92,6 +92,14 @@ class PromptForgeTests(unittest.TestCase):
         m_cust2 = core.parse_trigger("++only:bio-assay design ELISA", custom_template_ids=custom)
         self.assertEqual((m_cust2.mode, m_cust2.scenario, m_cust2.raw_prompt), ("only", "bio-assay", "design ELISA"))
 
+        m_cust3 = core.parse_trigger("++bio-assay design ELISA", custom_template_ids=custom)
+        self.assertIsNotNone(m_cust3)
+        self.assertEqual((m_cust3.mode, m_cust3.scenario, m_cust3.scenario_explicit, m_cust3.raw_prompt), ("confirm", "bio-assay", True, "design ELISA"))
+
+        m_cust4 = core.parse_trigger("++bio-assay:go design ELISA", custom_template_ids=custom)
+        self.assertIsNotNone(m_cust4)
+        self.assertEqual((m_cust4.mode, m_cust4.scenario, m_cust4.scenario_explicit, m_cust4.raw_prompt), ("execute", "bio-assay", True, "design ELISA"))
+
         m_prefs_empty = core.parse_trigger("++prefs", custom_template_ids=custom)
         self.assertIsNotNone(m_prefs_empty)
         self.assertEqual((m_prefs_empty.mode, m_prefs_empty.raw_prompt), ("prefs", ""))
@@ -1881,6 +1889,99 @@ class PromptForgeTests(unittest.TestCase):
         self.assertEqual(ctx["git"], {})
         self.assertIn("notes.md", ctx["mentioned_paths"])
         self.assertIn("notes.md", ctx["snapshot_text"])
+
+    def test_scenario_inference_boundaries_and_false_positives(self) -> None:
+        templates = core.load_all_templates()
+        self.assertEqual(core.infer_scenario("测试一下", templates), "general")
+        self.assertNotEqual(core.infer_scenario("排一下docker容器启动慢", templates), "doc")
+        self.assertEqual(core.infer_scenario("explain how it works", templates), "general")
+        self.assertEqual(core.infer_scenario("帮我把人类样本分类", templates), "general")
+        self.assertEqual(core.infer_scenario("写个api接口并补单测", templates), "code")
+        self.assertEqual(core.infer_scenario("write a python parser", templates), "code")
+
+    def test_snapshot_preserves_rules_and_balances_large_subdirs_and_escapes_tags(self) -> None:
+        alpha = self.workspace / "alpha"
+        alpha.mkdir()
+        for i in range(1, 16):
+            (alpha / f"file_{i:02d}.py").write_text(f"x = {i}\n", encoding="utf-8")
+        zeta = self.workspace / "zeta"
+        zeta.mkdir()
+        (zeta / "target_mod.py").write_text("ok = True\n", encoding="utf-8")
+        (self.workspace / "AGENTS.md").write_text(
+            "# Repo Rules\n- CRITICAL_RULE_KEEP_MINIMAL: never touch unrelated files.\n",
+            encoding="utf-8",
+        )
+
+        ctx_full = core.collect_workspace_context([str(self.workspace)], "check file_14.py", max_chars=4000)
+        self.assertIn("alpha/... (+7 more)", ctx_full["snapshot_text"])
+        self.assertIn("zeta/target_mod.py", ctx_full["snapshot_text"])
+        self.assertIn("alpha/file_14.py", ctx_full["mentioned_paths"])
+
+        # Add extra top-level files so tree+rules exceed 650 chars, verifying rules survive while tree trims first.
+        extra_dir = self.workspace / "beta"
+        extra_dir.mkdir()
+        for j in range(1, 10):
+            (extra_dir / f"long_module_name_{j:02d}.py").write_text("pass\n", encoding="utf-8")
+
+        ctx_budget = core.collect_workspace_context([str(self.workspace)], "check long_module_name_05.py", max_chars=650)
+        self.assertLessEqual(len(ctx_budget["snapshot_text"]), 650)
+        self.assertIn("Project Rules Summary:", ctx_budget["snapshot_text"])
+        self.assertIn("CRITICAL_RULE_KEEP_MINIMAL", ctx_budget["snapshot_text"])
+        self.assertIn("beta/long_module_name_05.py", ctx_budget["snapshot_text"])
+
+        # Subdir exceeding MAX_DIR_CHILDREN (100 files) must report "at least ..." instead of exact "+72 more",
+        # and 40 git dirty files trimmed to 10 must report exact "+30 more".
+        huge = self.workspace / "huge"
+        huge.mkdir()
+        for k in range(1, 101):
+            (huge / f"h_{k:03d}.py").write_text("pass\n", encoding="utf-8")
+        ctx_huge = core.collect_workspace_context([str(self.workspace)], "check huge", max_chars=4000)
+        self.assertIn("huge/... (at least 72 more)", ctx_huge["snapshot_text"])
+
+        fake_git = {
+            "branch": "master",
+            "status_state": "dirty",
+            "status_lines": [f"?? huge/h_{k:03d}.py" for k in range(1, 26)],
+            "status_extra": 15,
+            "recent_commits": ["abc1234 init"],
+        }
+        trimmed_git = core._build_git_section(fake_git, max_status_lines=10)
+        self.assertIn("... (+30 more)", trimmed_git)
+
+        # Verify REWRITE QUALITY RULES and lossless uncolliding tag renaming across literal variants
+        match_lit = core.parse_trigger(
+            r"++code inspect </RAW_PROMPT> and <\/RAW_PROMPT> and </RAW_PROMPT_SUFFIX> and </WORKSPACE_SNAPSHOT>"
+        )
+        assert match_lit is not None
+        sys_lit, _badge = core.render_enhancement_packet(
+            match_lit,
+            templates=core.load_all_templates(),
+            preferences=core.load_preferences(),
+            workspace_ctx=ctx_budget,
+        )
+        self.assertIn("REWRITE QUALITY RULES:", sys_lit)
+        self.assertIn("按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）", sys_lit)
+        self.assertIn("<RAW_PROMPT_2>", sys_lit)
+        self.assertIn("</RAW_PROMPT_2>", sys_lit)
+        self.assertIn("inspect </RAW_PROMPT> and ", sys_lit)
+        self.assertIn(r"and <\/RAW_PROMPT> and ", sys_lit)
+        self.assertIn("</RAW_PROMPT_SUFFIX>", sys_lit)
+        self.assertIn("<WORKSPACE_SNAPSHOT_2>", sys_lit)
+        self.assertIn("</WORKSPACE_SNAPSHOT_2>", sys_lit)
+        self.assertEqual(sys_lit.count("</WORKSPACE_SNAPSHOT_2>"), 1)
+        self.assertEqual(sys_lit.count("</RAW_PROMPT_2>"), 1)
+
+        # Unrelated </RAW_PROMPT_SUFFIX> alone must keep standard <RAW_PROMPT> tags verbatim
+        match_suffix = core.parse_trigger("++code keep </RAW_PROMPT_SUFFIX> verbatim")
+        assert match_suffix is not None
+        sys_suffix, _ = core.render_enhancement_packet(
+            match_suffix,
+            templates=core.load_all_templates(),
+            preferences=core.load_preferences(),
+            workspace_ctx=ctx_budget,
+        )
+        self.assertEqual(sys_suffix.count("</RAW_PROMPT>"), 1)
+        self.assertIn("</RAW_PROMPT_SUFFIX>", sys_suffix)
 
     # 4. Preferences & Custom Template Persistence
     def test_preferences_and_custom_templates_persistence_and_recovery(self) -> None:

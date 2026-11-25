@@ -1,7 +1,7 @@
 {
   "name": "prompt-forge",
   "displayName": "Prompt Forge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Explicit ++ and skill-triggered prompt optimizer that enriches raw instructions with workspace context, smart clarifying questions, scenario templates, and cross-project personal preferences.",
   "suggestedPrompts": [
     "++ 帮我重构当前仓库的构建脚本，补充约束与验收标准",

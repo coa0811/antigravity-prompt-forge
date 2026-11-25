@@ -4,8 +4,9 @@
     "name": "编码与调试",
     "description": "软件实现、重构、Bug 排查、脚本编写与测试验证。",
     "keywords": [
-      "代码", "重构", "修复", "实现", "函数", "类", "接口", "脚本", "测试", "报错", "调试",
-      "bug", "fix", "refactor", "implement", "debug", "test", "lint", "build", "api", "cli", "hook"
+      "代码", "重构", "修复", "实现", "函数", "接口", "脚本", "单测", "单元测试", "测试用例",
+      "写测试", "补测试", "跑测试", "报错", "异常", "调试",
+      "bug", "fix", "refactor", "implement", "debug", "test", "lint", "build", "api", "cli", "hook", "code", "script", "python"
     ],
     "sections": [
       "任务目标（Goal）",
@@ -79,8 +80,8 @@
     "name": "文档与内容创作",
     "description": "技术文档、说明手册、汇报材料、邮件/总结或结构化文案撰写。",
     "keywords": [
-      "文档", "写作", "总结", "报告", "手册", "邮件", "汇报", "readme", "docx", "pdf", "ppt",
-      "doc", "write", "draft", "summary", "report", "guide", "slides", "copy"
+      "文档", "写作", "总结", "报告", "手册", "邮件", "汇报", "润色", "readme", "docx", "pdf", "ppt",
+      "doc", "docs", "markdown", "draft", "summary", "report", "guide", "slides"
     ],
     "sections": [
       "受众与使用场景（Audience & Purpose）",

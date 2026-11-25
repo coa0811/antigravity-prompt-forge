@@ -53,14 +53,17 @@ For multi-line prompts or special shell characters, pipe via stdin with `--promp
      is already clear.
    - **Present the enhanced prompt**: Output a clean, copy-ready Markdown code block with
      the structured prompt matching the target scenario's sections and active preferences,
-     followed by a concise 3–5 bullet summary of added context and assumptions.
+     followed by a concise 3–5 bullet summary of added context and assumptions. Write in
+     direct imperative voice to the executing agent, scale detail proportionally to task
+     complexity without filler, preserve literal constraints verbatim, and label unconfirmed
+     defaults as revocable assumptions.
    - **Respect the mode boundary**:
      - `only`: Stop immediately after presenting the prompt and summary. Do NOT edit files
        or run mutating actions.
      - `confirm`: Do NOT edit files or run mutating actions yet. Call `ask_question` with:
        1. `(Recommended) 直接按优化后的指令执行`
        2. `仅保留优化稿（不执行，方便复制使用）`
-       3. `先微调优化稿（我在回复中说明修改意见）`
+       3. `按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）`
        Proceed only after the user confirms execution.
      - `execute`: Proceed directly using the enriched specification.
 
