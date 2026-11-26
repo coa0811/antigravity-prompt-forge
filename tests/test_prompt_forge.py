@@ -2138,6 +2138,683 @@ class PromptForgeTests(unittest.TestCase):
         self.assertIn("MODE=prefs", msg_obj["systemMessage"])
         self.assertIn("偏好与模板管理", msg_obj["systemMessage"])
 
+    def test_at_mention_cjk_and_space_path_matching(self) -> None:
+        (self.workspace / "张家界旅游2026").mkdir()
+        (self.workspace / "张家界旅游2026" / "generate_pdf.py").write_text("print('pdf')\n", encoding="utf-8")
+        (self.workspace / "audit file").mkdir()
+        (self.workspace / "audit file" / "report.md").write_text("# Audit\n", encoding="utf-8")
+        (self.workspace / "audit file" / "secret.key").write_text("secret\n", encoding="utf-8")
+        (self.workspace / "other" / "file").mkdir(parents=True)
+        (self.workspace / "other" / "file" / "report.md").write_text("# Other\n", encoding="utf-8")
+        (self.workspace / ".env").write_text("TOKEN=123\n", encoding="utf-8")
+        outside = self.root / "outside_secret.txt"
+        outside.write_text("nope\n", encoding="utf-8")
+
+        ctx = core.collect_workspace_context(
+            [str(self.workspace)],
+            "核对 @[张家界旅游2026/generate_pdf.py]、@[audit file/report.md]、@[.env]、@[audit file/secret.key]、@[../outside_secret.txt]",
+            max_chars=4000,
+        )
+        self.assertIn("张家界旅游2026/generate_pdf.py", ctx["mentioned_paths"])
+        self.assertIn("audit file/report.md", ctx["mentioned_paths"])
+        self.assertNotIn("other/file/report.md", ctx["mentioned_paths"])
+        self.assertNotIn(".env", ctx["mentioned_paths"])
+        self.assertNotIn("audit file/secret.key", ctx["mentioned_paths"])
+        self.assertNotIn("outside_secret.txt", ctx["mentioned_paths"])
+        self.assertIn("张家界旅游2026/generate_pdf.py", ctx["snapshot_text"])
+        self.assertIn("audit file/report.md", ctx["snapshot_text"])
+
+        ctx_cjk_plain = core.collect_workspace_context(
+            [str(self.workspace)],
+            "修改 张家界旅游2026/generate_pdf.py，然后验证输出",
+            max_chars=4000,
+        )
+        self.assertIn("张家界旅游2026/generate_pdf.py", ctx_cjk_plain["mentioned_paths"])
+
+        # Absolute path inside workspace must resolve relative to workspace root (not lstrip("/"))
+        (self.workspace / "plugins" / "next-step" / "scripts").mkdir(parents=True)
+        abs_target = self.workspace / "plugins" / "next-step" / "scripts" / "next_step_core.py"
+        abs_target.write_text("# core\n", encoding="utf-8")
+        ext_dir = self.root / "external_repo" / "audit file"
+        ext_dir.mkdir(parents=True)
+        ext_report = ext_dir / "report.md"
+        ext_report.write_text("# external\n", encoding="utf-8")
+        ctx_abs = core.collect_workspace_context(
+            [str(self.workspace)],
+            f"查看 @[{abs_target}] 和 @[{ext_report}] 以及 @[/audit file/report.md]",
+            max_chars=4000,
+        )
+        self.assertIn("plugins/next-step/scripts/next_step_core.py", ctx_abs["mentioned_paths"])
+        self.assertIn("audit file/report.md", ctx_abs["mentioned_paths"])
+        self.assertFalse(any("external_repo" in p for p in ctx_abs["mentioned_paths"]))
+
+        # Leading dots on dotfiles (@[.gitignore]) must be preserved, while parent traversal (@[../docs/build_docx.js]) must not strip '..'
+        (self.workspace / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+        (self.workspace / "docs").mkdir(exist_ok=True)
+        (self.workspace / "docs" / "build_docx.js").write_text("// doc\n", encoding="utf-8")
+        ext_docs = self.root / "docs"
+        ext_docs.mkdir(exist_ok=True)
+        (ext_docs / "build_docx.js").write_text("// outside\n", encoding="utf-8")
+
+        ctx_dot = core.collect_workspace_context(
+            [str(self.workspace)],
+            "检查 @[.gitignore] 和 @[../docs/build_docx.js]",
+            max_chars=4000,
+        )
+        self.assertIn(".gitignore", ctx_dot["mentioned_paths"])
+        self.assertNotIn("docs/build_docx.js", ctx_dot["mentioned_paths"])
+
+    def test_claude_rules_scoped_matching_and_exclusion(self) -> None:
+        (self.workspace / "docs").mkdir()
+        (self.workspace / "docs" / "build_docx.js").write_text("// doc builder\n", encoding="utf-8")
+        (self.workspace / "张家界旅游2026").mkdir()
+        (self.workspace / "张家界旅游2026" / "generate_pdf.py").write_text("print('ok')\n", encoding="utf-8")
+        (self.workspace / "scripts").mkdir()
+        (self.workspace / "scripts" / "app.py").write_text("print(1)\n", encoding="utf-8")
+
+        # Long root AGENTS.md (>2000 chars) must not starve matching .claude/rules/*.md
+        long_agents = ["# Root Rules"] + [f"- Top item {i}: keep code clean and concise." for i in range(45)]
+        (self.workspace / "AGENTS.md").write_text("\n".join(long_agents) + "\n", encoding="utf-8")
+
+        rules_dir = self.workspace / ".claude" / "rules"
+        rules_dir.mkdir(parents=True)
+        (rules_dir / "docs-build.md").write_text(
+            '---\npaths:\n  - "docs/**"\n---\n# Docs Rule\n- Never edit generated .docx directly.\n',
+            encoding="utf-8",
+        )
+        (rules_dir / "travel.md").write_text(
+            '---\npaths:\n  - "张家界旅游2026/**"\n---\n# Travel Rule\n- Keep generate_pdf.py single-file.\n',
+            encoding="utf-8",
+        )
+        (rules_dir / "always-on.md").write_text(
+            "# Always Rule\n- Always verify outputs.\n",
+            encoding="utf-8",
+        )
+        (rules_dir / "py-only.md").write_text(
+            '---\npaths: ["scripts/*.py"]\n---\n# Scripts Rule\n- Run unittest.\n',
+            encoding="utf-8",
+        )
+        (rules_dir / "doc-boundary.md").write_text(
+            '---\npaths:\n  - "doc/**"\n---\n# Doc Boundary\n- Should not match docker.\n',
+            encoding="utf-8",
+        )
+        (rules_dir / "secret.md").write_text("# Secret Rule\n- Hidden.\n", encoding="utf-8")
+        try:
+            (rules_dir / "symlink_rule.md").symlink_to(rules_dir / "always-on.md")
+        except OSError:
+            pass
+
+        ctx_docs_file = core.collect_workspace_context([str(self.workspace)], "修改 docs/build_docx.js", max_chars=4000)
+        files_docs = [r["file"] for r in ctx_docs_file["rules"]]
+        self.assertIn("AGENTS.md", files_docs)
+        self.assertIn(".claude/rules/docs-build.md", files_docs)
+        self.assertIn(".claude/rules/always-on.md", files_docs)
+        self.assertNotIn(".claude/rules/travel.md", files_docs)
+        self.assertNotIn(".claude/rules/py-only.md", files_docs)
+        self.assertNotIn(".claude/rules/secret.md", files_docs)
+        self.assertNotIn(".claude/rules/symlink_rule.md", files_docs)
+        self.assertLessEqual(
+            sum(len(r["summary"]) + len(r["file"]) + 8 for r in ctx_docs_file["rules"]),
+            core.MAX_RULES_CHARS,
+        )
+
+        # Directory prefix mention without concrete filename
+        ctx_docs_dir = core.collect_workspace_context([str(self.workspace)], "更新 docs/ 里的说明", max_chars=4000)
+        self.assertIn(".claude/rules/docs-build.md", [r["file"] for r in ctx_docs_dir["rules"]])
+
+        # CJK @mention path triggers travel.md and excludes docs-build.md
+        ctx_travel = core.collect_workspace_context(
+            [str(self.workspace)],
+            "检查 @[张家界旅游2026/generate_pdf.py]",
+            max_chars=4000,
+        )
+        files_travel = [r["file"] for r in ctx_travel["rules"]]
+        self.assertIn(".claude/rules/travel.md", files_travel)
+        self.assertIn(".claude/rules/always-on.md", files_travel)
+        self.assertNotIn(".claude/rules/docs-build.md", files_travel)
+
+        # Word boundary prevents "docker" from triggering "doc/**"
+        ctx_docker = core.collect_workspace_context([str(self.workspace)], "排一下docker容器启动慢", max_chars=4000)
+        self.assertNotIn(".claude/rules/doc-boundary.md", [r["file"] for r in ctx_docker["rules"]])
+
+        # Segment-aware glob: "src/*.py" matches "src/app.py", NOT "src/nested/app.py";
+        # "src/**/*.py" matches newly created uncreated "@[src/new_file.py]";
+        # "docs/**" does NOT match "vendor/docs/a.md".
+        (self.workspace / "src" / "nested").mkdir(parents=True)
+        (self.workspace / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (self.workspace / "src" / "nested" / "app.py").write_text("x = 2\n", encoding="utf-8")
+        (self.workspace / "vendor" / "docs").mkdir(parents=True)
+        (self.workspace / "vendor" / "docs" / "a.md").write_text("# Vendor\n", encoding="utf-8")
+        (rules_dir / "src-top.md").write_text(
+            '---\npaths:\n  - "src/*.py"\n---\n# Src Top Only\n- Keep top-level src clean.\n',
+            encoding="utf-8",
+        )
+        (rules_dir / "src-deep.md").write_text(
+            '---\npaths:\n  - "src/**/*.py"\n---\n# Src Deep\n- Add type hints.\n',
+            encoding="utf-8",
+        )
+
+        ctx_nested = core.collect_workspace_context([str(self.workspace)], "edit src/nested/app.py", max_chars=4000)
+        files_nested = [r["file"] for r in ctx_nested["rules"]]
+        self.assertNotIn(".claude/rules/src-top.md", files_nested)
+        self.assertIn(".claude/rules/src-deep.md", files_nested)
+
+        ctx_new_file = core.collect_workspace_context([str(self.workspace)], "create @[src/new_file.py]", max_chars=4000)
+        files_new = [r["file"] for r in ctx_new_file["rules"]]
+        self.assertIn(".claude/rules/src-top.md", files_new)
+        self.assertIn(".claude/rules/src-deep.md", files_new)
+
+        ctx_vendor = core.collect_workspace_context(
+            [str(self.workspace)],
+            "update vendor/docs/a.md and vendor/docs/ notes",
+            max_chars=4000,
+        )
+        self.assertNotIn(".claude/rules/docs-build.md", [r["file"] for r in ctx_vendor["rules"]])
+
+        # Uncreated file via absolute path inside workspace matches "src/**/*.py", while external path does not
+        abs_new = self.workspace / "src" / "brand_new.py"
+        ctx_abs_new = core.collect_workspace_context([str(self.workspace)], f"create @[{abs_new}]", max_chars=4000)
+        self.assertIn(".claude/rules/src-deep.md", [r["file"] for r in ctx_abs_new["rules"]])
+        ext_new = self.root / "other_ws" / "src" / "ext_new.py"
+        ctx_ext_new = core.collect_workspace_context([str(self.workspace)], f"create @[{ext_new}]", max_chars=4000)
+        self.assertNotIn(".claude/rules/src-deep.md", [r["file"] for r in ctx_ext_new["rules"]])
+
+        # Explicit file reference resolving outside docs/ (e.g. @[docs/../agents.md] or bare docs/../agents.md) must NOT trigger docs/**
+        (self.workspace / "agents.md").write_text("# Root\n- Rule.\n", encoding="utf-8")
+        ctx_dotdot_at = core.collect_workspace_context(
+            [str(self.workspace)],
+            "检查 @[docs/../agents.md]",
+            max_chars=4000,
+        )
+        self.assertNotIn(".claude/rules/docs-build.md", [r["file"] for r in ctx_dotdot_at["rules"]])
+        ctx_dotdot_bare = core.collect_workspace_context(
+            [str(self.workspace)],
+            "检查 docs/../agents.md",
+            max_chars=4000,
+        )
+        self.assertNotIn(".claude/rules/docs-build.md", [r["file"] for r in ctx_dotdot_bare["rules"]])
+
+    def test_tail_redlines_preserved_in_long_agents_md_and_compact_budget(self) -> None:
+        lines = ["# Repo Guidelines", "- Primary rule: keep replies concise."]
+        for i in range(1, 40):
+            lines.append(f"- Background guideline {i}: follow standard conventions across modules in this workspace.")
+        lines.extend(
+            [
+                "## Safety Boundaries",
+                "- Prefer YAGNI and minimal-diff changes.",
+                "**NEVER:**",
+                "- Modify `.env`, lockfiles, or CI secrets without explicit approval",
+                "- Delete user data or reset databases without confirmation",
+                "- Force-push to master or rewrite pushed history",
+                "**ALWAYS:**",
+                "- Show diff before committing",
+                "- Ask before making destructive or irreversible operations",
+                "- 严禁直接修改生成产物",
+            ]
+        )
+        long_text = "\n".join(lines)
+        self.assertGreater(len(long_text), 2500)
+
+        summary = core._summarize_rule_text(long_text, 1200)
+        self.assertLessEqual(len(summary), 1200)
+        self.assertIn("# Repo Guidelines", summary)
+        self.assertIn("**NEVER:**", summary)
+        self.assertIn("Delete user data or reset databases", summary)
+        self.assertIn("Force-push to master", summary)
+        self.assertIn("**ALWAYS:**", summary)
+        self.assertIn("Show diff before committing", summary)
+        self.assertIn("严禁直接修改生成产物", summary)
+        self.assertLess(summary.index("# Repo Guidelines"), summary.index("**NEVER:**"))
+        self.assertLess(summary.index("**NEVER:**"), summary.index("Force-push to master"))
+        self.assertLess(summary.index("Force-push to master"), summary.index("Show diff before committing"))
+        self.assertLess(summary.index("Show diff before committing"), summary.index("严禁直接修改生成产物"))
+
+        # In tight max_chars=650 with many tree files, Project Rules Summary compacts to <=240 and survives
+        (self.workspace / "AGENTS.md").write_text(long_text + "\n", encoding="utf-8")
+        pkg = self.workspace / "modules"
+        pkg.mkdir()
+        for j in range(1, 20):
+            (pkg / f"module_long_name_{j:02d}.py").write_text("pass\n", encoding="utf-8")
+
+        ctx_650 = core.collect_workspace_context([str(self.workspace)], "check module_long_name_01.py", max_chars=650)
+        self.assertLessEqual(len(ctx_650["snapshot_text"]), 650)
+        self.assertIn("Project Rules Summary:", ctx_650["snapshot_text"])
+
+        ctx_220 = core.collect_workspace_context([str(self.workspace)], "check module_long_name_01.py", max_chars=220)
+        self.assertLessEqual(len(ctx_220["snapshot_text"]), 220)
+
+    def test_multi_rule_repo_budget_preserves_all_never_always_bullets(self) -> None:
+        # Replicate real ~2.5KB AGENTS.md + 2 matched .claude/rules/*.md files loaded simultaneously
+        agents_lines = [
+            "# AGENTS.md",
+            "本仓库所有 Agent 共用准则。",
+            "**Tradeoff**：谨慎优先于速度；明显拼写错误直接执行。",
+            "## 1. 交互与行文（最高优先级）",
+            "- **称呼规则**：每次回复必须称呼用户为「绳匠」。无例外。",
+            "- **语言规则**：无论用户使用何种语言，**必须始终使用中文回复**。无例外。",
+            "- **反报告腔**：直出结论，随后附具体文件/行号/数据证据。",
+        ]
+        for i in range(1, 24):
+            agents_lines.append(f"- Context rule {i}: explain subsystem conventions and read-only constraints in detail.")
+        agents_lines.extend(
+            [
+                "## 4. 不可逆操作与 Git 安全红线",
+                "默认分支：`master`。敏感信息绝不入库。",
+                "**NEVER:**",
+                "- Modify `.env`, lockfiles, or CI secrets without explicit approval",
+                "- Auto-fix validation errors without asking user first",
+                "- Delete user data or reset databases without confirmation",
+                "- Force-push to `master` / `main` branch or rewrite pushed Git history",
+                "**ALWAYS:**",
+                "- Show diff before committing",
+                "- Ask before making destructive, paid, public-release, privilege-escalation, or irreversible operations",
+                "**上下文压缩保留项**：长会话执行 `/compact` 时，必须保留已拍板决策、验证状态及本节安全红线。",
+            ]
+        )
+        agents_text = "\n".join(agents_lines) + "\n"
+        self.assertGreater(len(agents_text), 2400)
+        (self.workspace / "AGENTS.md").write_text(agents_text, encoding="utf-8")
+
+        (self.workspace / "docs").mkdir()
+        (self.workspace / "docs" / "build_docx.js").write_text("// doc\n", encoding="utf-8")
+        (self.workspace / "张家界旅游2026").mkdir()
+        (self.workspace / "张家界旅游2026" / "generate_pdf.py").write_text("print(1)\n", encoding="utf-8")
+
+        rules_dir = self.workspace / ".claude" / "rules"
+        rules_dir.mkdir(parents=True)
+        (rules_dir / "docs-build.md").write_text(
+            '---\npaths:\n  - "docs/**"\n---\n# docs/ Word 文档构建规则\n- 改源文件/脚本，不改生成产物。\n- "生成文档" -> 跑 `node docs/build_docx.js`。\n',
+            encoding="utf-8",
+        )
+        (rules_dir / "travel-2026.md").write_text(
+            '---\npaths:\n  - "张家界旅游2026/**"\n---\n# 张家界旅游2026 子项目规则\n- Python 脚本保持单文件、直接跑。\n- 改源文件/脚本，不改产物。\n',
+            encoding="utf-8",
+        )
+
+        ctx = core.collect_workspace_context(
+            [str(self.workspace)],
+            "更新 docs/ 和 张家界旅游2026/",
+            max_chars=4000,
+        )
+        rule_files = [r["file"] for r in ctx["rules"]]
+        self.assertEqual(
+            rule_files,
+            ["AGENTS.md", ".claude/rules/docs-build.md", ".claude/rules/travel-2026.md"],
+        )
+        snap = ctx["snapshot_text"]
+        self.assertIn("Modify `.env`, lockfiles, or CI secrets without explicit approval", snap)
+        self.assertIn("Auto-fix validation errors without asking user first", snap)
+        self.assertIn("Delete user data or reset databases without confirmation", snap)
+        self.assertIn("Force-push to `master` / `main` branch or rewrite pushed Git history", snap)
+        self.assertIn("Show diff before committing", snap)
+        self.assertIn("Ask before making destructive", snap)
+
+    def test_git_head_direct_read_and_concurrent_git_calls(self) -> None:
+        (self.workspace / "main.py").write_text("print(1)\n", encoding="utf-8")
+        subprocess.run(["git", "init"], cwd=str(self.workspace), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(self.workspace), check=True)
+        subprocess.run(["git", "config", "user.name", "Tester"], cwd=str(self.workspace), check=True)
+        subprocess.run(["git", "checkout", "-b", "feat/fast-head"], cwd=str(self.workspace), check=True, capture_output=True)
+        subprocess.run(["git", "add", "main.py"], cwd=str(self.workspace), check=True)
+        subprocess.run(["git", "commit", "-m", "initial commit"], cwd=str(self.workspace), check=True, capture_output=True)
+
+        calls: list[str] = []
+        orig_run_git = core._run_git
+
+        def spy_run_git(root: Path, args: list[str]) -> tuple[bool, str]:
+            if args:
+                calls.append(args[0])
+            return orig_run_git(root, args)
+
+        with mock.patch.object(core, "_run_git", side_effect=spy_run_git):
+            info = core._collect_git_info(self.workspace)
+
+        self.assertEqual(info["branch"], "feat/fast-head")
+        self.assertEqual(info["status_state"], "clean")
+        self.assertEqual(len(info["recent_commits"]), 1)
+        self.assertEqual(set(calls), {"status", "log"})
+
+        # _run_git must invoke git with --no-optional-locks so .git/index stays read-only
+        sub_cmds: list[list[str]] = []
+        orig_sub_run = subprocess.run
+
+        def spy_sub_run(cmd: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess:
+            sub_cmds.append(list(cmd))
+            return orig_sub_run(cmd, *args, **kwargs)
+
+        with mock.patch("prompt_forge_core.subprocess.run", side_effect=spy_sub_run):
+            ok_st, _ = core._run_git(self.workspace, ["status", "--porcelain=v1"])
+        self.assertTrue(ok_st)
+        self.assertEqual(sub_cmds[0][:4], ["git", "-C", str(self.workspace), "--no-optional-locks"])
+
+        # Detached 40-hex HEAD is also read directly without invoking git rev-parse
+        subprocess.run(["git", "checkout", "--detach", "HEAD"], cwd=str(self.workspace), check=True, capture_output=True)
+        calls.clear()
+        with mock.patch.object(core, "_run_git", side_effect=spy_run_git):
+            detached_branch = core._read_git_head_branch(self.workspace)
+        self.assertEqual(detached_branch, "HEAD")
+        self.assertEqual(calls, [])
+
+        # Worktree / gitfile fallback calls git rev-parse
+        wt_dir = self.root / "wt"
+        subprocess.run(["git", "worktree", "add", "-b", "wt-branch", str(wt_dir)], cwd=str(self.workspace), check=True, capture_output=True)
+        calls.clear()
+        with mock.patch.object(core, "_run_git", side_effect=spy_run_git):
+            wt_branch = core._read_git_head_branch(wt_dir)
+        self.assertEqual(wt_branch, "wt-branch")
+        self.assertIn("rev-parse", calls)
+
+    def test_expanded_scenario_keywords(self) -> None:
+        templates = core.load_all_templates()
+        self.assertEqual(core.infer_scenario("优化 next-step 插件性能", templates), "code")
+        self.assertEqual(core.infer_scenario("optimize typescript ui component perf", templates), "code")
+        self.assertEqual(core.infer_scenario("做一次技术评审并输出对比方案演进路线", templates), "plan")
+
+        match = core.parse_trigger("++ 优化 next-step 插件性能")
+        assert match is not None
+        sys_msg, badge = core.render_enhancement_packet(match, templates=templates, preferences=core.load_preferences())
+        self.assertIn("SCENARIO=code (inferred)", sys_msg)
+        self.assertIn("[code]", badge)
+
+    def test_raw_stdin_fast_path_and_session_prune_on_new_only(self) -> None:
+        buf = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO('{"conversationId": "c1", "lastUserInput": "explain code"}')), mock.patch(
+            "json.loads", side_effect=AssertionError("json.loads must be skipped on non-++ raw stdin")
+        ), contextlib.redirect_stdout(buf):
+            hook.main()
+        self.assertEqual(json.loads(buf.getvalue()), {})
+
+        # Fresh python process confirms prompt_forge_core is not imported on fast-path
+        proc = subprocess.run(
+            [
+                str(SCRIPTS_DIR / "run_python.sh"),
+                "-c",
+                (
+                    "import io, sys; "
+                    f"sys.path.insert(0, {str(SCRIPTS_DIR)!r}); "
+                    "import prompt_forge_hook as h; "
+                    "sys.stdin = io.StringIO('{\"lastUserInput\":\"hello\"}'); "
+                    "h.main(); "
+                    "assert 'prompt_forge_core' not in sys.modules"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        self.assertEqual(proc.stdout.strip(), "{}")
+
+        # ASCII-escaped fullwidth & '+' triggers (\\uff0b\\uff0b, \\u002b\\u002b, +\\u002b) pass pre-filter and trigger
+        for raw_json_line in (
+            json.dumps({"conversationId": "conv-fw-esc", "lastUserInput": "＋＋ 查看偏好", "workspacePaths": [str(self.workspace)]}, ensure_ascii=True),
+            '{"conversationId":"conv-u002b-both","lastUserInput":"\\u002b\\u002bonly review","workspacePaths":' + json.dumps([str(self.workspace)]) + "}",
+            '{"conversationId":"conv-u002b-mixed","lastUserInput":"+\\u002bonly review","workspacePaths":' + json.dumps([str(self.workspace)]) + "}",
+        ):
+            esc_out = subprocess.run(
+                [str(SCRIPTS_DIR / "run_python.sh"), str(SCRIPTS_DIR / "prompt_forge_hook.py")],
+                input=raw_json_line,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PLUGIN_DATA": str(self.data_dir)},
+                cwd=str(PLUGIN_ROOT),
+                timeout=5,
+                check=True,
+            )
+            self.assertIn("injectSteps", json.loads(esc_out.stdout.strip()))
+
+        # Non-prefix C\\u002b\\u002b skips prompt_forge_core import after JSON decode
+        cpp_proc = subprocess.run(
+            [
+                str(SCRIPTS_DIR / "run_python.sh"),
+                "-c",
+                (
+                    "import io, sys; "
+                    f"sys.path.insert(0, {str(SCRIPTS_DIR)!r}); "
+                    "import prompt_forge_hook as h; "
+                    "sys.stdin = io.StringIO('{\"lastUserInput\":\"C\\\\u002b\\\\u002b code\"}'); "
+                    "h.main(); "
+                    "assert 'prompt_forge_core' not in sys.modules"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        self.assertEqual(cpp_proc.stdout.strip(), "{}")
+
+        # save_session calls _prune_sessions only when creating a new session file
+        with mock.patch.object(core, "_prune_sessions") as mock_prune:
+            core.save_session("conv-prune-check", {"lastUserStepIndex": -1})
+            self.assertEqual(mock_prune.call_count, 1)
+            core.save_session("conv-prune-check", {"lastUserStepIndex": 5})
+            self.assertEqual(mock_prune.call_count, 1)
+
+    # 6. Execution Tool Routing
+    def test_execution_tool_recommendation_heuristics_and_guards(self) -> None:
+        # Simple / localized / general tasks -> none (YAGNI default)
+        for simple in (
+            "",
+            "修复 auth.py 第 42 行的空指针报错",
+            "更新 README.md 中的安装说明",
+            "解释一下这个函数的参数含义",
+            "解释 JSON Schema 是什么",
+            "仅把 README 中的 pipeline 改为大写",
+            "解释 fan-out 是什么",
+            "写一段 map-reduce 概念说明",
+            "对比两个蛋白结合筛选策略",
+            "修复 CI 流水线报错",
+            "validate JSON schema for plugin.json",
+            "use boost::asio to fix socket timeout",
+            "use swarm plot in seaborn",
+            "批量扫描 2 个文件并汇总",
+            "批量处理三个文件",
+            "遍历所有 3 个文件并汇总",
+            "批量处理 a.py、b.py 和 c.py",
+            "batch process three files and summarize",
+            "逐个扫描 2 个文件并汇总",
+            "在 README 中添加 5 个示例",
+        ):
+            rec = core.recommend_execution_tool(simple)
+            self.assertEqual(rec["tool"], "none", f"Expected none for {simple!r}, got {rec}")
+            self.assertEqual(rec["execution_scope"], "in_session")
+
+        # Batch fan-out -> /run-workflow (in-session)
+        for wf_prompt in (
+            "遍历 20 个模块文件提取接口签名并汇总成 JSON 表",
+            "批量遍历 10 个文件并按 JSON Schema 汇总",
+            "用流水线批量处理 8 篇文献并汇总",
+            "遍历所有十三个文件并汇总",
+            "批量处理二十四篇文献并汇总",
+        ):
+            rec_wf = core.recommend_execution_tool(wf_prompt)
+            self.assertEqual(rec_wf["tool"], "/run-workflow")
+            self.assertEqual(rec_wf["execution_scope"], "in_session")
+            self.assertEqual(rec_wf["confidence"], "high")
+
+        # Deep concurrency / root cause -> /boost (host_slash)
+        rec_boost = core.recommend_execution_tool("排查偶发死锁与竞态条件根因并做严密验证")
+        self.assertEqual(rec_boost["tool"], "/boost")
+        self.assertEqual(rec_boost["execution_scope"], "host_slash")
+        self.assertEqual(rec_boost["confidence"], "high")
+
+        # Parallel multi-module + verifier -> /swarm (host_slash)
+        rec_swarm = core.recommend_execution_tool(
+            "将 parser、lexer、codegen 三个模块并行重构并配 verifier 交叉验证"
+        )
+        self.assertEqual(rec_swarm["tool"], "/swarm")
+        self.assertEqual(rec_swarm["execution_scope"], "host_slash")
+        self.assertEqual(rec_swarm["confidence"], "high")
+
+        # Multi-file workspace_ctx paths (>=3) + parallel cue + verifier -> /swarm
+        rec_swarm_ctx = core.recommend_execution_tool(
+            "并行重构这几个文件并做独立复核",
+            workspace_ctx={"mentioned_paths": ["a.py", "b.py", "c.py"]},
+        )
+        self.assertEqual(rec_swarm_ctx["tool"], "/swarm")
+
+        # End-to-end 0->1 project -> /teamwork (host_slash)
+        rec_team = core.recommend_execution_tool("从零搭建完整全栈实验管理平台并端到端交付")
+        self.assertEqual(rec_team["tool"], "/teamwork")
+        self.assertEqual(rec_team["execution_scope"], "host_slash")
+
+        # Meta-Q&A comparing tools -> none
+        rec_meta = core.recommend_execution_tool("对比 /swarm、/teamwork、/run-workflow、/boost 有什么区别")
+        self.assertEqual(rec_meta["tool"], "none")
+        self.assertIn("meta_qa", rec_meta["signals"])
+
+        rec_howto = core.recommend_execution_tool("怎么用 /swarm 做并行？")
+        self.assertEqual(rec_howto["tool"], "none")
+        self.assertIn("meta_qa", rec_howto["signals"])
+
+        rec_howto_trailing = core.recommend_execution_tool("/swarm 怎么用？")
+        self.assertEqual(rec_howto_trailing["tool"], "none")
+        self.assertIn("meta_qa", rec_howto_trailing["signals"])
+
+        for q_enable in ("/run-workflow 怎么启用？", "/swarm 怎么启用？", "How to use /swarm?"):
+            rec_enable = core.recommend_execution_tool(q_enable)
+            self.assertEqual(rec_enable["tool"], "none")
+            self.assertIn("meta_qa", rec_enable["signals"])
+
+        # Explicit 2-file workspace_ctx list with 逐一 must NOT trigger /run-workflow
+        rec_two_ctx = core.recommend_execution_tool(
+            "逐一检查 @[README.md] 和 @[plugin.json]",
+            workspace_ctx={"mentioned_paths": ["README.md", "plugin.json"]},
+        )
+        self.assertEqual(rec_two_ctx["tool"], "none")
+        rec_two_all_ctx = core.recommend_execution_tool(
+            "遍历所有列出的文件（仅 @[README.md] 和 @[plugin.json]）并汇总",
+            workspace_ctx={"mentioned_paths": ["README.md", "plugin.json"]},
+        )
+        self.assertEqual(rec_two_all_ctx["tool"], "none")
+        rec_dir_to_single_out = core.recommend_execution_tool(
+            "遍历目录下所有文件并汇总到 report.md",
+            workspace_ctx={"mentioned_paths": ["report.md"]},
+        )
+        self.assertEqual(rec_dir_to_single_out["tool"], "/run-workflow")
+        rec_all_with_out = core.recommend_execution_tool(
+            "遍历所有插件文件，逐个计算 SHA-256 并汇总为 JSON，结果写入 @[checksums.json]",
+            workspace_ctx={"mentioned_paths": []},
+        )
+        self.assertEqual(rec_all_with_out["tool"], "/run-workflow")
+
+        # Per-tool negation & global opt-out guards (including CJK-adjacent /swarm并行 and backticks)
+        rec_neg = core.recommend_execution_tool("不用 /swarm，分三个模块并行重构并交叉验证")
+        self.assertNotEqual(rec_neg["tool"], "/swarm")
+        rec_neg_cjk = core.recommend_execution_tool("不要用/swarm并行修改三个模块")
+        self.assertEqual(rec_neg_cjk["tool"], "none")
+        rec_neg_cjk2 = core.recommend_execution_tool("不使用swarm同时修改三个模块并交叉验证")
+        self.assertEqual(rec_neg_cjk2["tool"], "none")
+        rec_neg_please_dont = core.recommend_execution_tool("请勿使用 /swarm，并行修改三个模块")
+        self.assertEqual(rec_neg_please_dont["tool"], "none")
+        rec_neg_backtick = core.recommend_execution_tool("请勿使用 `/swarm`，并行修改三个模块")
+        self.assertEqual(rec_neg_backtick["tool"], "none")
+        rec_neg_enable = core.recommend_execution_tool("不要启用 /swarm，并行修改三个模块")
+        self.assertEqual(rec_neg_enable["tool"], "none")
+        rec_neg_polite = core.recommend_execution_tool("请不要再启用 /swarm，并行修改三个模块")
+        self.assertEqual(rec_neg_polite["tool"], "none")
+        rec_optout = core.recommend_execution_tool("不使用任何编排工具，直接修 parser")
+        self.assertEqual(rec_optout["tool"], "none")
+        self.assertIn("explicit_opt_out", rec_optout["signals"])
+        rec_optout_please = core.recommend_execution_tool("请勿使用任何编排工具，并行修改三个模块")
+        self.assertEqual(rec_optout_please["tool"], "none")
+        self.assertIn("explicit_opt_out", rec_optout_please["signals"])
+
+        # Explicit single-tool adoption vs comparative multi-tool fallthrough
+        rec_explicit = core.recommend_execution_tool("用 /boost 排查这个缓存问题")
+        self.assertEqual(rec_explicit["tool"], "/boost")
+        self.assertIn("explicit_request", rec_explicit["signals"])
+
+        rec_explicit_diff = core.recommend_execution_tool("用 /boost 深入分析两种算法的区别")
+        self.assertEqual(rec_explicit_diff["tool"], "/boost")
+        self.assertIn("explicit_request", rec_explicit_diff["signals"])
+
+        rec_explicit_xgb = core.recommend_execution_tool("用 /boost 分析 XGBoost 的优势与性能瓶颈")
+        self.assertEqual(rec_explicit_xgb["tool"], "/boost")
+        self.assertIn("explicit_request", rec_explicit_xgb["signals"])
+
+        rec_meta_pair = core.recommend_execution_tool("用 /boost 和 /swarm 有什么区别")
+        self.assertEqual(rec_meta_pair["tool"], "none")
+        self.assertIn("meta_qa", rec_meta_pair["signals"])
+
+        rec_cmp = core.recommend_execution_tool("看看适合 /swarm 还是 /run-workflow：批量扫描 30 个文件汇总")
+        self.assertEqual(rec_cmp["tool"], "/run-workflow")
+
+    def test_tool_routing_preferences_cli_and_packet_modes(self) -> None:
+        (self.workspace / "main.py").write_text("print(1)\n", encoding="utf-8")
+
+        def run_cli(*argv: str) -> tuple[int, str]:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc_val = cli.main(["--data-dir", str(self.data_dir), *argv])
+            return rc_val, buf.getvalue()
+
+        # Backward compatibility: legacy preferences.json missing tool_routing defaults to auto
+        core.ensure_data_dirs()
+        core.PREFS_PATH.write_text(
+            json.dumps({"version": 1, "language": "zh-CN", "default_mode": "confirm"}),
+            encoding="utf-8",
+        )
+        self.assertEqual(core.load_preferences()["tool_routing"], "auto")
+
+        # prefs set --tool-routing off persists and packet omits routing block
+        rc_off, off_out = run_cli("prefs", "set", "--tool-routing", "off")
+        self.assertEqual(rc_off, 0)
+        self.assertEqual(json.loads(off_out)["tool_routing"], "off")
+
+        rc_pkt_off, pkt_off_json = run_cli(
+            "packet",
+            "--workspace",
+            str(self.workspace),
+            "--prompt",
+            "遍历 20 个模块文件并汇总",
+            "--format",
+            "json",
+        )
+        self.assertEqual(rc_pkt_off, 0)
+        pkt_off = json.loads(pkt_off_json)
+        self.assertEqual(pkt_off["tool_routing"], "off")
+        self.assertIsNone(pkt_off["tool_recommendation"])
+        self.assertNotIn("EXECUTION TOOL ROUTING", pkt_off["packet"])
+        self.assertIn("按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）", pkt_off["packet"])
+
+        # CLI --tool-routing auto override restores routing block and JSON recommendation
+        rc_pkt_auto, pkt_auto_json = run_cli(
+            "packet",
+            "--workspace",
+            str(self.workspace),
+            "--tool-routing",
+            "auto",
+            "--prompt",
+            "遍历 20 个模块文件并汇总",
+            "--format",
+            "json",
+        )
+        self.assertEqual(rc_pkt_auto, 0)
+        pkt_auto = json.loads(pkt_auto_json)
+        self.assertEqual(pkt_auto["tool_routing"], "auto")
+        self.assertEqual(pkt_auto["tool_recommendation"]["tool"], "/run-workflow")
+        self.assertIn("EXECUTION TOOL ROUTING", pkt_auto["packet"])
+        self.assertIn("Heuristic hint (overridable): tool=/run-workflow", pkt_auto["packet"])
+
+        # render_enhancement_packet in auto mode keeps badge unchanged, preserves edit option string,
+        # and documents confirm branching for none, /run-workflow, and host slash commands
+        match = core.parse_trigger("++code 排查偶发死锁与竞态条件根因并做严密验证")
+        assert match is not None
+        sys_msg, badge = core.render_enhancement_packet(
+            match,
+            templates=core.load_all_templates(),
+            preferences={**core.load_preferences(), "tool_routing": "auto"},
+            workspace_ctx={"workspace_name": "repo", "snapshot_text": "Workspace: repo"},
+        )
+        self.assertNotIn("/boost", badge)
+        self.assertIn("EXECUTION TOOL ROUTING", sys_msg)
+        self.assertIn("tool=/boost", sys_msg)
+        self.assertIn("保留带 /<cmd> 前缀的优化稿并结束本轮", sys_msg)
+        self.assertIn("直接在当前会话调用 run_workflow 按优化稿执行", sys_msg)
+        self.assertIn("按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）", sys_msg)
+
 
 if __name__ == "__main__":
     unittest.main()

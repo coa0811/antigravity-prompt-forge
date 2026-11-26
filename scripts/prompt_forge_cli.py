@@ -45,6 +45,10 @@ def _cmd_packet(args: argparse.Namespace) -> int:
     if mode not in core.VALID_MODES:
         print(f"Error: invalid mode '{mode}'.", file=sys.stderr)
         return 2
+    tool_routing = (args.tool_routing or prefs.get("tool_routing") or "auto").strip().lower()
+    if tool_routing not in core.VALID_TOOL_ROUTING:
+        print(f"Error: invalid tool_routing '{tool_routing}'.", file=sys.stderr)
+        return 2
 
     match = core.TriggerMatch(
         mode=mode,
@@ -56,9 +60,14 @@ def _cmd_packet(args: argparse.Namespace) -> int:
     ws_paths = args.workspace or [str(Path.cwd())]
     ctx = core.collect_workspace_context(ws_paths, raw_prompt)
     system_msg, user_badge = core.render_enhancement_packet(
-        match, templates=templates, preferences=prefs, workspace_ctx=ctx
+        match,
+        templates=templates,
+        preferences=prefs,
+        workspace_ctx=ctx,
+        tool_routing_override=tool_routing,
     )
     if args.format == "json":
+        tool_rec = core.recommend_execution_tool(raw_prompt, ctx) if tool_routing == "auto" else None
         print(
             json.dumps(
                 {
@@ -66,6 +75,8 @@ def _cmd_packet(args: argparse.Namespace) -> int:
                     "mode": mode,
                     "scenario": core.infer_scenario(raw_prompt, templates) if scenario == "auto" else scenario,
                     "workspace": ctx["workspace_path"],
+                    "tool_routing": tool_routing,
+                    "tool_recommendation": tool_rec,
                     "packet": system_msg,
                 },
                 ensure_ascii=False,
@@ -85,10 +96,14 @@ def _cmd_prefs(args: argparse.Namespace) -> int:
         print(json.dumps(core.load_preferences(), ensure_ascii=False, indent=2))
         return 0
     if action == "set":
-        if args.language is None and args.default_mode is None:
-            print("Error: specify --language and/or --default-mode.", file=sys.stderr)
+        if args.language is None and args.default_mode is None and args.tool_routing is None:
+            print("Error: specify --language, --default-mode, and/or --tool-routing.", file=sys.stderr)
             return 2
-        updated = core.update_preferences(language=args.language, default_mode=args.default_mode)
+        updated = core.update_preferences(
+            language=args.language,
+            default_mode=args.default_mode,
+            tool_routing=args.tool_routing,
+        )
         print(json.dumps(updated, ensure_ascii=False, indent=2))
         return 0
     if action == "add-constraint":
@@ -185,6 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pkt.add_argument("--prompt-file", help="Path to file containing prompt, or '-' for stdin")
     p_pkt.add_argument("--mode", choices=list(core.VALID_MODES), help="Execution confirmation mode")
     p_pkt.add_argument("--scenario", default="auto", help="Scenario/template ID or 'auto'")
+    p_pkt.add_argument("--tool-routing", choices=list(core.VALID_TOOL_ROUTING), help="Override execution tool routing mode")
     p_pkt.add_argument("--format", choices=["markdown", "json"], default="markdown")
 
     p_prefs = sub.add_parser("prefs", help="Manage persistent Prompt Forge personal preferences")
@@ -193,6 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pset = prefs_sub.add_parser("set")
     p_pset.add_argument("--language")
     p_pset.add_argument("--default-mode", choices=list(core.VALID_MODES))
+    p_pset.add_argument("--tool-routing", choices=list(core.VALID_TOOL_ROUTING))
 
     for act in ("add-constraint", "add-style", "add-avoid"):
         p_add = prefs_sub.add_parser(act)

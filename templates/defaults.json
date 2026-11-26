@@ -6,7 +6,9 @@
     "keywords": [
       "代码", "重构", "修复", "实现", "函数", "接口", "脚本", "单测", "单元测试", "测试用例",
       "写测试", "补测试", "跑测试", "报错", "异常", "调试",
-      "bug", "fix", "refactor", "implement", "debug", "test", "lint", "build", "api", "cli", "hook", "code", "script", "python"
+      "优化", "性能", "提速", "插件", "前端", "样式", "组件", "面板",
+      "bug", "fix", "refactor", "implement", "debug", "test", "lint", "build", "api", "cli", "hook", "code", "script", "python",
+      "optimize", "optimization", "performance", "perf", "plugin", "mcp", "typescript", "ts", "javascript", "js", "css", "html", "ui", "ux"
     ],
     "sections": [
       "任务目标（Goal）",
@@ -31,6 +33,7 @@
     "description": "技术方案对比、系统架构设计、迁移路线与实施计划。",
     "keywords": [
       "架构", "方案", "设计", "规划", "计划", "选型", "权衡", "迁移", "拆分", "路线",
+      "演进", "对比方案", "技术评审",
       "design", "architecture", "plan", "proposal", "spec", "tradeoff", "roadmap", "rfc"
     ],
     "sections": [

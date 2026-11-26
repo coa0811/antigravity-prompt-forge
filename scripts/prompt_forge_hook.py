@@ -319,7 +319,17 @@ def _parse_optional_int(val: Any) -> int | None:
 
 def main() -> None:
     try:
-        payload = json.load(sys.stdin)
+        raw_stdin = sys.stdin.read()
+    except Exception:
+        print("{}")
+        return
+    low_stdin = raw_stdin.lower()
+    if not any(tok in low_stdin for tok in ("++", "＋＋", "\\uff0b", "\\u002b")):
+        print("{}")
+        return
+
+    try:
+        payload = json.loads(raw_stdin)
         if not isinstance(payload, dict):
             payload = {}
     except Exception:
