@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import datetime
+import functools
 import json
 import os
+import posixpath
 import re
 import subprocess
+import sys
 import tempfile
 import time
 import traceback
@@ -46,7 +49,12 @@ MODE_ALIASES: dict[str, str] = {
     **EXEC_MODE_ALIASES,
     "prefs": "prefs",
 }
-RESERVED_TEMPLATE_IDS = set(MODE_ALIASES.keys()) | {"auto"}
+ROUTING_ALIASES: dict[str, str] = {
+    "notool": "off",
+    "direct": "off",
+    "autotool": "auto",
+}
+RESERVED_TEMPLATE_IDS = set(MODE_ALIASES.keys()) | set(ROUTING_ALIASES.keys()) | {"auto"}
 TEMPLATE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 MODE_DISPLAY_NAMES = {
@@ -90,7 +98,7 @@ MAX_SESSIONS_KEEP = 200
 
 AT_MENTION_RE = re.compile(r"@\[([^\[\]\r\n]{1,200})\]")
 PATH_TOKEN_RE = re.compile(
-    r"[^\s`\"'<>|*?():;,\[\]@]+(?:\.[A-Za-z0-9]{1,10}|/[^\s`\"'<>|*?():;,\[\]@]+)"
+    r"[^\s`\"'<>|*?():;,\[\]@，。、；：？！]+(?:\.[A-Za-z0-9]{1,10}|/[^\s`\"'<>|*?():;,\[\]@，。、；：？！]+)"
 )
 BACKTICK_TOKEN_RE = re.compile(r"`([^`\n]{2,120})`")
 HIGH_PRIORITY_RULE_RE = re.compile(
@@ -122,6 +130,7 @@ class TriggerMatch:
     scenario_explicit: bool
     raw_prompt: str
     prefix_token: str
+    tool_routing_override: str | None = None
 
 
 def set_data_dir(new_dir: Path | str) -> None:
@@ -386,7 +395,39 @@ def _normalize_template(tid: str, raw: Any, *, custom: bool) -> dict[str, Any] |
     }
 
 
+_BUILTIN_TEMPLATES_CACHE: tuple[tuple[int, int], dict[str, dict[str, Any]]] | None = None
+
+
+def _copy_template_map(src: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        tid: {
+            "id": tpl["id"],
+            "name": tpl["name"],
+            "description": tpl["description"],
+            "keywords": list(tpl["keywords"]),
+            "sections": list(tpl["sections"]),
+            "clarifying_focus": list(tpl["clarifying_focus"]),
+            "verification_hints": list(tpl["verification_hints"]),
+            "custom": tpl["custom"],
+        }
+        for tid, tpl in src.items()
+    }
+
+
 def load_builtin_templates() -> dict[str, dict[str, Any]]:
+    global _BUILTIN_TEMPLATES_CACHE
+    stat_key: tuple[int, int] | None = None
+    try:
+        st = DEFAULTS_TEMPLATE_PATH.stat()
+        stat_key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stat_key = None
+
+    if stat_key is not None and _BUILTIN_TEMPLATES_CACHE is not None:
+        cached_key, cached_val = _BUILTIN_TEMPLATES_CACHE
+        if cached_key == stat_key:
+            return _copy_template_map(cached_val)
+
     raw = load_json_safe(DEFAULTS_TEMPLATE_PATH, {})
     out: dict[str, dict[str, Any]] = {}
     if isinstance(raw, dict):
@@ -394,27 +435,61 @@ def load_builtin_templates() -> dict[str, dict[str, Any]]:
             norm = _normalize_template(str(tid).strip().lower(), tpl, custom=False)
             if norm is not None:
                 out[norm["id"]] = norm
+    if stat_key is not None and out:
+        _BUILTIN_TEMPLATES_CACHE = (stat_key, _copy_template_map(out))
     return out
 
 
-def load_custom_templates() -> dict[str, dict[str, Any]]:
+def _load_raw_custom_templates_dict() -> dict[str, Any]:
     raw = load_json_safe(TEMPLATES_PATH, {})
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _serialize_custom_template(tid: str, norm: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": tid,
+        "name": norm["name"],
+        "description": norm["description"],
+        "keywords": norm["keywords"],
+        "sections": norm["sections"],
+        "clarifying_focus": norm["clarifying_focus"],
+        "verification_hints": norm["verification_hints"],
+    }
+
+
+def _load_persisted_custom_templates(exclude_id: str | None = None) -> dict[str, Any]:
+    persisted: dict[str, Any] = {}
+    for tid, tpl in _load_raw_custom_templates_dict().items():
+        raw_id = str(tid).strip().lower()
+        if not raw_id or raw_id == exclude_id or not isinstance(tpl, dict):
+            continue
+        norm = (
+            _normalize_template(raw_id, tpl, custom=True)
+            if TEMPLATE_ID_RE.match(raw_id)
+            else None
+        )
+        persisted[raw_id] = _serialize_custom_template(raw_id, norm) if norm is not None else dict(tpl)
+    return persisted
+
+
+def load_custom_templates(*, include_reserved: bool = False) -> dict[str, dict[str, Any]]:
+    raw = _load_raw_custom_templates_dict()
     out: dict[str, dict[str, Any]] = {}
-    if isinstance(raw, dict):
-        for tid, tpl in raw.items():
-            try:
-                valid_id = validate_template_id(str(tid))
-            except ValueError:
-                continue
-            norm = _normalize_template(valid_id, tpl, custom=True)
-            if norm is not None:
-                out[valid_id] = norm
+    for tid, tpl in raw.items():
+        raw_id = str(tid).strip().lower()
+        if not TEMPLATE_ID_RE.match(raw_id):
+            continue
+        if not include_reserved and raw_id in RESERVED_TEMPLATE_IDS:
+            continue
+        norm = _normalize_template(raw_id, tpl, custom=True)
+        if norm is not None:
+            out[raw_id] = norm
     return out
 
 
-def load_all_templates() -> dict[str, dict[str, Any]]:
+def load_all_templates(*, include_reserved: bool = False) -> dict[str, dict[str, Any]]:
     merged = load_builtin_templates()
-    for tid, tpl in load_custom_templates().items():
+    for tid, tpl in load_custom_templates(include_reserved=include_reserved).items():
         merged[tid] = tpl
     return merged
 
@@ -424,28 +499,8 @@ def save_custom_template(tid: str, spec: dict[str, Any]) -> dict[str, Any]:
     norm = _normalize_template(valid_id, spec, custom=True)
     if norm is None:
         raise ValueError("Template must contain a non-empty 'sections' list.")
-    existing = load_custom_templates()
-    persisted = {
-        k: {
-            "id": k,
-            "name": v["name"],
-            "description": v["description"],
-            "keywords": v["keywords"],
-            "sections": v["sections"],
-            "clarifying_focus": v["clarifying_focus"],
-            "verification_hints": v["verification_hints"],
-        }
-        for k, v in existing.items()
-    }
-    persisted[valid_id] = {
-        "id": valid_id,
-        "name": norm["name"],
-        "description": norm["description"],
-        "keywords": norm["keywords"],
-        "sections": norm["sections"],
-        "clarifying_focus": norm["clarifying_focus"],
-        "verification_hints": norm["verification_hints"],
-    }
+    persisted = _load_persisted_custom_templates(exclude_id=valid_id)
+    persisted[valid_id] = _serialize_custom_template(valid_id, norm)
     ensure_data_dirs()
     atomic_write_json(TEMPLATES_PATH, persisted)
     return norm
@@ -453,22 +508,10 @@ def save_custom_template(tid: str, spec: dict[str, Any]) -> dict[str, Any]:
 
 def delete_custom_template(tid: str) -> bool:
     valid_id = tid.strip().lower()
-    existing = load_custom_templates()
-    if valid_id not in existing:
+    persisted = _load_persisted_custom_templates()
+    if valid_id not in persisted:
         return False
-    del existing[valid_id]
-    persisted = {
-        k: {
-            "id": k,
-            "name": v["name"],
-            "description": v["description"],
-            "keywords": v["keywords"],
-            "sections": v["sections"],
-            "clarifying_focus": v["clarifying_focus"],
-            "verification_hints": v["verification_hints"],
-        }
-        for k, v in existing.items()
-    }
+    del persisted[valid_id]
     ensure_data_dirs()
     atomic_write_json(TEMPLATES_PATH, persisted)
     return True
@@ -513,6 +556,7 @@ def parse_trigger(
     known_scenarios = set(BUILTIN_SCENARIO_IDS)
     if custom_template_ids:
         known_scenarios |= {t.strip().lower() for t in custom_template_ids if t.strip()}
+    known_scenarios -= RESERVED_TEMPLATE_IDS
 
     if ":" not in modifier_raw:
         tok = modifier_raw.lower()
@@ -535,6 +579,17 @@ def parse_trigger(
                 raw_prompt=rest,
                 prefix_token=f"{prefix}{modifier_raw}",
             )
+        if tok in ROUTING_ALIASES:
+            if not rest:
+                return None
+            return TriggerMatch(
+                mode=fallback_mode,
+                scenario="auto",
+                scenario_explicit=False,
+                raw_prompt=rest,
+                prefix_token=f"{prefix}{modifier_raw}",
+                tool_routing_override=ROUTING_ALIASES[tok],
+            )
         if tok in known_scenarios and TEMPLATE_ID_RE.match(tok):
             if not rest:
                 return None
@@ -548,16 +603,11 @@ def parse_trigger(
         return None
 
     parts = modifier_raw.split(":")
-    if len(parts) != 2:
-        return None
-    left, right = parts[0].lower(), parts[1].lower()
-    if not right:
-        return None
     if not rest:
         return None
-
-    if left == "":
-        if not TEMPLATE_ID_RE.match(right) or right not in known_scenarios:
+    if len(parts) == 2 and parts[0] == "":
+        right = parts[1].lower()
+        if not right or not TEMPLATE_ID_RE.match(right) or right not in known_scenarios:
             return None
         return TriggerMatch(
             mode=fallback_mode,
@@ -567,23 +617,42 @@ def parse_trigger(
             prefix_token=f"{prefix}{modifier_raw}",
         )
 
-    if left in EXEC_MODE_ALIASES and right in known_scenarios and TEMPLATE_ID_RE.match(right):
-        return TriggerMatch(
-            mode=EXEC_MODE_ALIASES[left],
-            scenario=right,
-            scenario_explicit=True,
-            raw_prompt=rest,
-            prefix_token=f"{prefix}{modifier_raw}",
-        )
-    if right in EXEC_MODE_ALIASES and left in known_scenarios and TEMPLATE_ID_RE.match(left):
-        return TriggerMatch(
-            mode=EXEC_MODE_ALIASES[right],
-            scenario=left,
-            scenario_explicit=True,
-            raw_prompt=rest,
-            prefix_token=f"{prefix}{modifier_raw}",
-        )
-    return None
+    if not (2 <= len(parts) <= 3) or any(not p for p in parts):
+        return None
+
+    chosen_mode: str | None = None
+    chosen_routing: str | None = None
+    chosen_scenario: str | None = None
+    categories_seen = 0
+    for raw_part in parts:
+        p = raw_part.lower()
+        if p in EXEC_MODE_ALIASES:
+            if chosen_mode is not None:
+                return None
+            chosen_mode = EXEC_MODE_ALIASES[p]
+            categories_seen += 1
+        elif p in ROUTING_ALIASES:
+            if chosen_routing is not None:
+                return None
+            chosen_routing = ROUTING_ALIASES[p]
+            categories_seen += 1
+        elif p in known_scenarios and TEMPLATE_ID_RE.match(p):
+            if chosen_scenario is not None:
+                return None
+            chosen_scenario = p
+            categories_seen += 1
+        else:
+            return None
+    if categories_seen < 2:
+        return None
+    return TriggerMatch(
+        mode=chosen_mode if chosen_mode is not None else fallback_mode,
+        scenario=chosen_scenario if chosen_scenario is not None else "auto",
+        scenario_explicit=(chosen_scenario is not None),
+        raw_prompt=rest,
+        prefix_token=f"{prefix}{modifier_raw}",
+        tool_routing_override=chosen_routing,
+    )
 
 
 def _keyword_matches(low_prompt: str, kw_low: str) -> bool:
@@ -1028,6 +1097,7 @@ def _seg_to_regex(seg: str) -> str:
     return "".join(out)
 
 
+@functools.lru_cache(maxsize=256)
 def _glob_to_regex(pattern: str) -> re.Pattern[str]:
     pat = _normalize_rel_pattern(pattern).lower()
     if pat.endswith("/"):
@@ -1119,6 +1189,8 @@ def _collect_project_rules(
     root: Path,
     mentioned_paths: list[str] | None = None,
     raw_prompt: str = "",
+    *,
+    resolved_tokens: list[tuple[str, str | None]] | None = None,
 ) -> list[dict[str, str]]:
     candidates = ("AGENTS.md", "agents.md", "GEMINI.md", "CLAUDE.md")
     seen_inodes: set[tuple[int, int]] = set()
@@ -1140,10 +1212,12 @@ def _collect_project_rules(
         if raw.strip():
             rule_entries.append((name, raw))
 
+    if resolved_tokens is None:
+        resolved_tokens = _resolve_prompt_path_tokens(root, raw_prompt)
     existing_mentioned = list(mentioned_paths or [])
     prompt_rule_paths = [
         rp
-        for rp, existing_rel in _resolve_prompt_path_tokens(root, raw_prompt)
+        for rp, existing_rel in resolved_tokens
         if existing_rel is not None
         or not any(
             mp.lower() == rp.lower() or mp.lower().endswith("/" + rp.lower())
@@ -1217,73 +1291,303 @@ def _collect_project_rules(
     return summaries
 
 
+_BACKTICK_SHELL_CUE_RE = re.compile(r"(?:^|\s)--?[A-Za-z0-9]|&&|\|\||[|;=]")
+
+
+def _safe_resolve_within_root(
+    root_resolved: Path,
+    rel: str,
+    root_abs_norm: str = "",
+) -> Path | None:
+    """Resolve `rel` segment-by-segment strictly within `root_resolved` via readlink (never probing outside)."""
+    root_res_norm = root_resolved.as_posix()
+    abs_norm = root_abs_norm or root_res_norm
+    pending = deque(p for p in rel.replace("\\", "/").split("/") if p and p != ".")
+    cur = root_resolved
+    hops = 0
+    while pending:
+        part = pending.popleft()
+        if part == "..":
+            if cur == root_resolved:
+                return None
+            cur = cur.parent
+            continue
+        cand = cur / part
+        try:
+            if cand.is_symlink():
+                hops += 1
+                if hops > 40:
+                    return None
+                raw_link = os.readlink(cand).replace("\\", "/")
+                if raw_link.startswith("/"):
+                    matched_ws, link_rel = _strip_workspace_abs_prefix(
+                        raw_link, abs_norm, root_res_norm
+                    )
+                    if not matched_ws or link_rel is None:
+                        return None
+                    cur = root_resolved
+                    if link_rel != ".":
+                        link_parts = [p for p in link_rel.split("/") if p and p != "."]
+                        for lp in reversed(link_parts):
+                            pending.appendleft(lp)
+                else:
+                    link_parts = [p for p in raw_link.split("/") if p and p != "."]
+                    for lp in reversed(link_parts):
+                        pending.appendleft(lp)
+            else:
+                cur = cand
+        except OSError:
+            return None
+    try:
+        cur.relative_to(root_resolved)
+    except ValueError:
+        return None
+    return None if cur == root_resolved else cur
+
+
+def _strip_workspace_abs_prefix(
+    abs_norm: str, root_abs_norm: str, root_res_norm: str
+) -> tuple[bool, str | None]:
+    raw_clean = re.sub(r"^/+", "/", abs_norm).rstrip("/")
+    if not raw_clean:
+        return (True, ".") if "/" in (root_abs_norm, root_res_norm) else (False, None)
+    casefold = sys.platform in ("darwin", "win32")
+    raw_prefixes = [root_abs_norm, root_res_norm]
+    if sys.platform == "darwin":
+        for base in (root_abs_norm, root_res_norm):
+            if base.startswith("/private/"):
+                raw_prefixes.append(base[len("/private") :])
+            elif base.startswith(("/var/", "/tmp/", "/etc/")):
+                raw_prefixes.append("/private" + base)
+    for prefix in dict.fromkeys(raw_prefixes):
+        if not prefix:
+            continue
+        if prefix == "/":
+            suffix = raw_clean.lstrip("/")
+            if not suffix:
+                return True, "."
+            if suffix == ".." or suffix.startswith("../"):
+                return True, None
+            return True, suffix
+        cand_cmp = raw_clean.lower() if casefold else raw_clean
+        pref_cmp = prefix.lower() if casefold else prefix
+        if cand_cmp == pref_cmp:
+            return True, "."
+        if cand_cmp.startswith(pref_cmp + "/"):
+            suffix = raw_clean[len(prefix) + 1 :]
+            if not suffix or suffix == ".":
+                return True, "."
+            if suffix == ".." or suffix.startswith("../"):
+                return True, None
+            return True, suffix
+    return False, None
+
+
+def _is_workspace_path_or_spaced_dir(
+    root: Path | None,
+    root_resolved: Path | None,
+    root_abs_norm: str,
+    root_res_norm: str,
+    candidate: str,
+) -> bool:
+    if root is None or root_resolved is None or not candidate:
+        return False
+    cand = candidate.strip()
+    if not cand:
+        return False
+    if cand.startswith("/"):
+        matched_ws, matched_rel = _strip_workspace_abs_prefix(
+            cand, root_abs_norm, root_res_norm
+        )
+        if matched_ws:
+            if not matched_rel or matched_rel == ".":
+                return False
+            rel = matched_rel
+        else:
+            rel = cand.lstrip("/")
+    else:
+        rel = cand
+    while rel.startswith("./"):
+        rel = rel[2:]
+    rel = rel.lstrip("/")
+    if not rel:
+        return False
+    res = _safe_resolve_within_root(root_resolved, rel, root_abs_norm=root_abs_norm)
+    if res is None:
+        return False
+    try:
+        if res.exists():
+            return True
+        rel_parts = res.relative_to(root_resolved).parts
+    except (OSError, ValueError):
+        return False
+    if len(rel_parts) > 1 and " " in rel_parts[0]:
+        anchor_dir = root_resolved / rel_parts[0]
+        try:
+            return anchor_dir.is_dir() and not anchor_dir.is_symlink()
+        except OSError:
+            return False
+    return False
+
+
+def _clean_plain_path_token(raw_tok: str) -> str:
+    return (
+        raw_tok.replace("\\", "/")
+        .strip()
+        .strip("()[]'\"「」『』【】《》“”‘’")
+        .lstrip(",:;!?，。、；：？！")
+        .rstrip(".,:;!?。，、；：？！")
+    )
+
+
+def _extract_normalized_prompt_tokens(
+    raw_prompt: str,
+    root: Path | None = None,
+    root_resolved: Path | None = None,
+    root_abs_norm: str = "",
+    root_res_norm: str = "",
+) -> list[str]:
+    if not raw_prompt:
+        return []
+    out: list[str] = []
+    for match in AT_MENTION_RE.findall(raw_prompt):
+        norm = match.strip().replace("\\", "/").strip()
+        if norm:
+            out.append(norm)
+
+    prompt_without_at = AT_MENTION_RE.sub(" ", raw_prompt)
+    for match in BACKTICK_TOKEN_RE.findall(prompt_without_at):
+        bt = match.strip()
+        if not bt:
+            continue
+        bt_norm = bt.replace("\\", "/").strip()
+        if any(ch.isspace() for ch in bt_norm) and not _is_workspace_path_or_spaced_dir(
+            root, root_resolved, root_abs_norm, root_res_norm, bt_norm
+        ):
+            sub_paths = [
+                cleaned
+                for m in PATH_TOKEN_RE.findall(bt)
+                if (cleaned := _clean_plain_path_token(m.strip()))
+            ]
+            if sub_paths and (
+                root is not None
+                or _BACKTICK_SHELL_CUE_RE.search(bt)
+                or len(sub_paths) >= 2
+            ):
+                out.extend(sub_paths)
+                continue
+        out.append(bt_norm)
+
+    prompt_plain = BACKTICK_TOKEN_RE.sub(" ", prompt_without_at)
+    for match in PATH_TOKEN_RE.findall(prompt_plain):
+        tok = match.strip()
+        if not tok:
+            continue
+        parts = (
+            re.split(r"[，。、；：？！]+", tok)
+            if any(sep in tok for sep in "，。、；：？！")
+            else [tok]
+        )
+        for sub in parts:
+            norm = _clean_plain_path_token(sub)
+            if norm:
+                out.append(norm)
+    return out
+
+
+def _extract_lexical_prompt_path_tokens(raw_prompt: str) -> list[str]:
+    """Extract normalized relative path tokens purely lexically without filesystem calls."""
+    results: list[str] = []
+    seen: set[str] = set()
+    for norm in _extract_normalized_prompt_tokens(raw_prompt):
+        if norm.startswith("/"):
+            continue
+        while norm.startswith("./"):
+            norm = norm[2:]
+        if not norm:
+            continue
+        cleaned = posixpath.normpath(norm)
+        if cleaned in ("", ".", "..") or cleaned.startswith("../"):
+            continue
+        parts = tuple(p for p in cleaned.split("/") if p)
+        if not parts or _is_ignored_rel(parts):
+            continue
+        if cleaned not in seen:
+            seen.add(cleaned)
+            results.append(cleaned)
+    return results
+
+
 def _resolve_prompt_path_tokens(
     root: Path,
     raw_prompt: str,
 ) -> list[tuple[str, str | None]]:
-    if not raw_prompt:
-        return []
-    tokens: list[str] = []
-    for match in AT_MENTION_RE.findall(raw_prompt):
-        tokens.append(match.strip())
-    prompt_without_at = AT_MENTION_RE.sub(" ", raw_prompt)
-    for match in BACKTICK_TOKEN_RE.findall(prompt_without_at):
-        tokens.append(match.strip())
-    for match in PATH_TOKEN_RE.findall(prompt_without_at):
-        tokens.append(match.strip())
-
-    expanded_tokens: list[str] = []
-    for tok in tokens:
-        expanded_tokens.append(tok)
-        if any(sep in tok for sep in "，。、；：？！"):
-            for sub in re.split(r"[，。、；：？！]+", tok):
-                if sub.strip():
-                    expanded_tokens.append(sub.strip())
-
+    root_abs_norm = posixpath.normpath(os.path.abspath(str(root)))
     root_resolved = root.resolve()
+    root_res_norm = root_resolved.as_posix()
+    normalized_tokens = _extract_normalized_prompt_tokens(
+        raw_prompt,
+        root=root,
+        root_resolved=root_resolved,
+        root_abs_norm=root_abs_norm,
+        root_res_norm=root_res_norm,
+    )
+    if not normalized_tokens:
+        return []
     results: list[tuple[str, str | None]] = []
     seen_rel: set[str] = set()
 
-    for raw_tok in expanded_tokens:
-        norm = (
-            raw_tok.replace("\\", "/")
-            .strip()
-            .strip("()[]'\"「」『』【】《》“”‘’")
-            .lstrip(",:;!?，。、；：？！")
-            .rstrip(".,:;!?。，、；：？！")
-        )
-        if not norm:
-            continue
-
+    for norm in normalized_tokens:
         if norm.startswith("/"):
-            p_abs = Path(norm)
-            try:
-                res_abs = p_abs.resolve()
-                rel_abs = res_abs.relative_to(root_resolved)
-                rel_str = rel_abs.as_posix()
-                if rel_str and rel_str != ".":
-                    if (
-                        not any(_is_secret_name(part) for part in rel_abs.parts)
-                        and not _is_ignored_rel(rel_abs.parts)
-                        and rel_str not in seen_rel
-                    ):
-                        seen_rel.add(rel_str)
-                        results.append((rel_str, rel_str if res_abs.is_file() else None))
-                continue
-            except (OSError, ValueError):
-                # External absolute path (top-level dir exists at '/' outside workspace) -> reject.
-                parts = p_abs.parts
-                if len(parts) > 1 and (Path("/") / parts[1]).exists():
+            matched_ws, matched_rel = _strip_workspace_abs_prefix(
+                norm, root_abs_norm, root_res_norm
+            )
+            if matched_ws:
+                if not matched_rel or matched_rel == ".":
                     continue
-                norm = norm.lstrip("/")
+                norm = matched_rel
+            else:
+                # Treat non-workspace leading '/' as workspace-relative ONLY when it matches an
+                # existing file or top-level non-symlink anchor dir inside `root` (never stat host '/').
+                cand_rel = norm.lstrip("/")
+                while cand_rel.startswith("./"):
+                    cand_rel = cand_rel[2:]
+                cand_rel = cand_rel.lstrip("/")
+                if not cand_rel:
+                    continue
+                if any(_is_secret_name(part) for part in Path(cand_rel).parts):
+                    continue
+                res_ws = _safe_resolve_within_root(root_resolved, cand_rel, root_abs_norm=root_abs_norm)
+                if res_ws is None:
+                    continue
+                try:
+                    rel_ws = res_ws.relative_to(root_resolved)
+                except ValueError:
+                    continue
+                rel_ws_parts = rel_ws.parts
+                if not rel_ws_parts:
+                    continue
+                anchor_dir = root_resolved / rel_ws_parts[0]
+                if not (
+                    res_ws.exists()
+                    or (len(rel_ws_parts) > 1 and anchor_dir.is_dir() and not anchor_dir.is_symlink())
+                ):
+                    continue
+                rel_str = rel_ws.as_posix()
+                if rel_str and rel_str != "." and not _is_ignored_rel(rel_ws_parts) and rel_str not in seen_rel:
+                    seen_rel.add(rel_str)
+                    results.append((rel_str, rel_str if res_ws.is_file() else None))
+                continue
 
         while norm.startswith("./"):
             norm = norm[2:]
         norm = norm.lstrip("/")
         if not norm or any(_is_secret_name(part) for part in Path(norm).parts):
             continue
+        res_direct = _safe_resolve_within_root(root_resolved, norm, root_abs_norm=root_abs_norm)
+        if res_direct is None:
+            continue
         try:
-            res_direct = (root / norm).resolve()
             rel_direct = res_direct.relative_to(root_resolved)
             rel_str = rel_direct.as_posix()
             if not rel_str or rel_str == "." or _is_ignored_rel(rel_direct.parts):
@@ -1301,8 +1605,11 @@ def _match_mentioned_paths(
     root: Path,
     raw_prompt: str,
     candidate_files: list[str],
+    *,
+    resolved_tokens: list[tuple[str, str | None]] | None = None,
 ) -> list[str]:
-    resolved_tokens = _resolve_prompt_path_tokens(root, raw_prompt)
+    if resolved_tokens is None:
+        resolved_tokens = _resolve_prompt_path_tokens(root, raw_prompt)
     if not resolved_tokens:
         return []
 
@@ -1482,8 +1789,16 @@ def collect_workspace_context(
     root = _resolve_workspace_root(workspace_paths)
     tree_entries, candidate_files, truncated = _walk_workspace_bfs(root)
     git_info = _collect_git_info(root)
-    mentioned = _match_mentioned_paths(root, raw_prompt, candidate_files)
-    rules = _collect_project_rules(root, mentioned_paths=mentioned, raw_prompt=raw_prompt)
+    resolved_tokens = _resolve_prompt_path_tokens(root, raw_prompt)
+    mentioned = _match_mentioned_paths(
+        root, raw_prompt, candidate_files, resolved_tokens=resolved_tokens
+    )
+    rules = _collect_project_rules(
+        root,
+        mentioned_paths=mentioned,
+        raw_prompt=raw_prompt,
+        resolved_tokens=resolved_tokens,
+    )
 
     ctx: dict[str, Any] = {
         "workspace_name": root.name or str(root),
@@ -1745,7 +2060,12 @@ def recommend_execution_tool(
 
     mentioned_paths = (workspace_ctx or {}).get("mentioned_paths") or []
     text_for_input_refs = _SMALL_OUTPUT_REF_RE.sub(" ", text)
-    explicit_input_tokens = _resolve_prompt_path_tokens(Path("/"), text_for_input_refs)
+    if ws_path_str := (workspace_ctx or {}).get("workspace_path"):
+        explicit_input_tokens = [
+            rel for rel, _ in _resolve_prompt_path_tokens(Path(ws_path_str), text_for_input_refs)
+        ]
+    else:
+        explicit_input_tokens = _extract_lexical_prompt_path_tokens(text_for_input_refs)
     input_ref_count = len(explicit_input_tokens)
     if input_ref_count == 0 and mentioned_paths and not _SMALL_OUTPUT_REF_RE.search(text):
         input_ref_count = len(mentioned_paths)
@@ -1856,17 +2176,35 @@ def render_enhancement_packet(
             "~/.gemini/config/plugins/prompt-forge/scripts/prompt_forge_cli.py"
         )
         prefs_json = json.dumps(preferences, ensure_ascii=False, indent=2)
-        tpl_summary = ", ".join(
+        legacy_custom = {
+            k: v
+            for k, v in load_custom_templates(include_reserved=True).items()
+            if k in RESERVED_TEMPLATE_IDS and k not in templates
+        }
+        tpl_entries = [
             f"{tid}({'custom' if tpl.get('custom') else 'builtin'})"
             for tid, tpl in templates.items()
-        )
+        ]
+        tpl_entries.extend(f"{tid}(legacy-reserved)" for tid in legacy_custom)
+        tpl_summary = ", ".join(tpl_entries)
         req_text = match.raw_prompt or "查看当前 Prompt Forge 个人偏好与模板库"
         raw_tag = _pick_uncolliding_tag("RAW_PROMPT", req_text)
+        cli_block = "\n".join(
+            [
+                "CLI:",
+                "- `prefs show|reset`",
+                "- `prefs set [--language <lang>] [--default-mode <confirm|only|execute>] [--tool-routing <auto|off>]`",
+                "- `add/remove-{constraint,style,avoid}` · `set/remove-glossary`",
+                "- `template list|show|save|delete`",
+                '- `route --workspace <dir> --prompt "..."`',
+            ]
+        )
         sys_msg = "\n".join(
             [
                 "[Prompt Forge · MODE=prefs]",
                 f"Begin response with exact line:\n{badge}",
                 f"Manage Prompt Forge preferences/templates via `{cli_cmd}` (`run_command`), report concisely, and STOP without editing workspace files.",
+                cli_block,
                 f"Templates: {tpl_summary}",
                 f"Preferences:\n```json\n{prefs_json}\n```",
                 f"<{raw_tag}>\n{req_text}\n</{raw_tag}>",
@@ -1901,85 +2239,90 @@ def render_enhancement_packet(
     )
 
     raw_routing = (
-        tool_routing_override if tool_routing_override is not None else preferences.get("tool_routing")
+        tool_routing_override
+        if tool_routing_override is not None
+        else (
+            match.tool_routing_override
+            if match.tool_routing_override is not None
+            else preferences.get("tool_routing")
+        )
     )
     routing_mode = str(raw_routing or "auto").strip().lower()
     if routing_mode not in VALID_TOOL_ROUTING:
         routing_mode = "auto"
 
-    routing_block = ""
     if routing_mode == "auto":
         tool_rec = recommend_execution_tool(match.raw_prompt, workspace_ctx)
         routing_block = "\n".join(
             [
-                "EXECUTION TOOL ROUTING (pick ONE final verdict after verifying against workspace & prompt; default `none` per YAGNI):",
-                "- `none` (default, in-session): Single-file/localized edits, straightforward fixes, docs, or Q&A directly executable in one session.",
-                "- `/run-workflow` (in-session via `run_workflow` tool/skill): Deterministic Python fan-out/pipeline over >=5 independent items (files, modules, targets) returning structured schemas.",
-                "- `/boost` (host slash cmd): High-difficulty single-task deep work (race conditions, deadlocks, memory leaks, subtle root-cause debugging, complex/security-critical algorithms).",
-                "- `/swarm` (host slash cmd): Multi-worker parallel modules requiring shared-board coordination or independent verifier cross-checks (quota-heavy; avoid same-file edits).",
-                "- `/teamwork` (host slash cmd): End-to-end 0->1 project/system delivery handed over to an autonomous team.",
+                "EXECUTION TOOL ROUTING (pick 1 after verifying workspace/prompt; default `none` per YAGNI):",
+                "- `none` (default, in-session): local edits, simple fixes, docs, Q&A.",
+                "- `/run-workflow` (in-session `run_workflow` skill/tool): deterministic >=5-item fan-out/pipeline (structured schema).",
+                "- `/boost` (host `/` cmd): deep single-task root-cause, concurrency, or complex/security algo.",
+                "- `/swarm` (host `/` cmd): parallel multi-module + board/verifier cross-check (quota-heavy; distinct files).",
+                "- `/teamwork` (host `/` cmd): autonomous 0->1 end-to-end delivery.",
                 f"- Heuristic hint (overridable): tool={tool_rec['tool']} (confidence={tool_rec['confidence']}, scope={tool_rec['execution_scope']}) — {tool_rec['reason']}",
-                "- Fenced Prompt Prefix Rule: If final choice is `/run-workflow`, `/boost`, `/swarm`, or `/teamwork`, start line 1 inside the fenced markdown block with `/<cmd> <concise imperative headline>` (no duplicate `/<cmd>`), followed by the structured sections. If final choice is `none`, emit a pure prompt with NO leading `/` command.",
-                "- Summary Bullet Requirement: Include 1 bullet outside the fenced block: `执行工具建议：<tool 或 不选（常规直跑）> — <一句话选型理由与权衡>`.",
+                "- Fence line 1: if choice != `none`, start with `/<cmd> <headline>` (no dup); else NO leading `/`.",
+                "- Outside-fence bullet: `执行工具建议：<tool 或 不选（常规直跑）> — <一句话选型理由与权衡>`.",
             ]
+        )
+    else:
+        routing_block = (
+            "TOOL ROUTING=off: Emit a pure fenced prompt with NO leading `/` command prefix, "
+            "and omit `执行工具建议`."
         )
 
     if routing_mode == "auto":
         if match.mode == "only":
             mode_rule = (
-                "MODE=only: Output ONLY the enhanced prompt (fenced markdown, following the Fenced Prompt Prefix Rule) "
-                "+ 3-5 bullet changelog/assumptions & tool-routing summary, then STOP. NEVER edit files or execute the task."
+                "MODE=only: Output ONLY fenced prompt (obey Fence line 1) + 3-5 changelog/assumptions & routing bullets, "
+                "then STOP. NEVER edit files or run the task."
             )
         elif match.mode == "execute":
             mode_rule = (
-                "MODE=execute: State enriched spec/assumptions and final tool choice briefly, call `ask_question` (1-3 choices) "
-                "ONLY if dangerous/irreversible ambiguity blocks safe execution, then execute: if `none`, run directly in-session; "
-                "if `/run-workflow`, load `run-workflow` skill and invoke `run_workflow`; if `/boost`/`/swarm`/`/teamwork`, note in 1 line "
-                "that host `/` input is required to trigger that slash command in future runs and execute the enriched spec directly "
-                "in-session (NEVER call `swarm` tool unprompted)."
+                "MODE=execute: Briefly state spec/assumptions & tool choice; call `ask_question` (1-3 choices) ONLY for "
+                "dangerous/irreversible ambiguity. Execute: `none` -> run in-session; `/run-workflow` -> load `run-workflow` skill & "
+                "call `run_workflow`; `/boost`/`/swarm`/`/teamwork` -> note in 1 line that host `/` input is needed to trigger them, "
+                "and run spec directly in-session (NEVER call `swarm` tool unprompted)."
             )
         else:
             mode_rule = (
-                "MODE=confirm: NEVER edit files or run mutating commands before confirmation. "
-                "If critical unknowns exist (scope, destructive trade-offs, incompatible options), ask 1-3 `ask_question` MCQs first. "
-                "Output enhanced prompt (fenced markdown, following the Fenced Prompt Prefix Rule) + 3-5 bullet changelog/assumptions "
-                "& tool-routing summary, then call `ask_question` choosing the exact branch matching your FINAL tool choice:\n"
-                "- If final choice is `none`:\n"
+                "MODE=confirm: NEVER edit/mutate before confirm. Ask 1-3 `ask_question` MCQs first only for critical unknowns. "
+                "Output fenced prompt (obey Fence line 1) + 3-5 changelog/assumptions & routing bullets, then call `ask_question` matching final tool:\n"
+                "- `none`:\n"
                 "  1. `(Recommended) 直接按优化后的指令执行`\n"
                 "  2. `仅保留优化稿（不执行，方便复制使用）`\n"
                 "  3. `按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）`\n"
-                "- If final choice is `/run-workflow`:\n"
+                "- `/run-workflow`:\n"
                 "  1. `(Recommended) 直接在当前会话调用 run_workflow 按优化稿执行`\n"
                 "  2. `仅保留带 /run-workflow 前缀的优化稿（方便复制手动发送）`\n"
                 "  3. `不启用 /run-workflow，改为在当前会话常规直跑`\n"
                 "  4. `按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）`\n"
-                "- If final choice is `/boost`, `/swarm`, or `/teamwork` (host slash cmd — agent cannot self-start mid-turn; replace `<cmd>` with `boost`/`swarm`/`teamwork`):\n"
+                "- `/boost`/`/swarm`/`/teamwork` (host slash cmd; cannot self-start mid-turn; substitute `<cmd>`):\n"
                 "  1. `(Recommended) 保留带 /<cmd> 前缀的优化稿并结束本轮（复制发送即可激活 /<cmd>）`\n"
                 "  2. `不启用 /<cmd>，直接在当前会话按优化稿常规执行`\n"
                 "  3. `按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）`\n"
-                "(In Plan Mode, align cleanly and proceed only after confirmation; if executing `/run-workflow`, load the `run-workflow` skill; NEVER invoke `swarm` tool unprompted.)"
+                "(Plan Mode: confirm before proceeding; `/run-workflow` loads `run-workflow` skill; NEVER call `swarm` tool unprompted.)"
             )
     else:
         if match.mode == "only":
             mode_rule = (
-                "MODE=only: Output ONLY the enhanced prompt (fenced markdown) + 3-5 bullet "
-                "changelog/assumptions summary, then STOP. NEVER edit files or execute the task."
+                "MODE=only: Output ONLY fenced prompt + 3-5 changelog/assumptions bullets, "
+                "then STOP. NEVER edit files or run the task."
             )
         elif match.mode == "execute":
             mode_rule = (
-                "MODE=execute: State enriched spec/assumptions briefly, call `ask_question` (1-3 choices) "
-                "ONLY if dangerous/irreversible ambiguity blocks safe execution, then execute directly."
+                "MODE=execute: Briefly state spec/assumptions; call `ask_question` (1-3 choices) "
+                "ONLY for dangerous/irreversible ambiguity, then execute directly."
             )
         else:
             mode_rule = (
-                "MODE=confirm: NEVER edit files or run mutating commands before confirmation. "
-                "If critical unknowns exist (scope, destructive trade-offs, incompatible options), ask "
-                "1-3 `ask_question` MCQs first. Output enhanced prompt (fenced markdown) + 3-5 bullet "
-                "changelog/assumptions summary, then call `ask_question`:\n"
+                "MODE=confirm: NEVER edit/mutate before confirm. Ask 1-3 `ask_question` MCQs first only for critical unknowns. "
+                "Output fenced prompt + 3-5 changelog/assumptions bullets, then call `ask_question`:\n"
                 "  1. `(Recommended) 直接按优化后的指令执行`\n"
                 "  2. `仅保留优化稿（不执行，方便复制使用）`\n"
                 "  3. `按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）`\n"
-                "(In Plan Mode, align cleanly and proceed only after confirmation.)"
+                "(Plan Mode: confirm before proceeding.)"
             )
 
     pref_lines: list[str] = [
@@ -2009,11 +2352,11 @@ def render_enhancement_packet(
     rewrite_rules = "\n".join(
         [
             "REWRITE QUALITY RULES:",
-            '1. Direct Imperative Voice: Write inside fenced block as direct instruction to executing agent—never third-person ("The user wants...").',
-            '2. Proportional Depth: Scale length to complexity; merge simple sections, omit buzzwords ("comprehensive", "robust", "best practices").',
-            f'3. Preserve Hard Literals: Keep paths, identifiers, flags, numbers, URLs, error strings, and negative constraints ("do not modify X") from <{raw_tag}> verbatim.',
-            "4. Facts vs. Revocable Assumptions: Label unconfirmed defaults as revocable assumptions, not hard requirements.",
-            "5. Verifiable Done Criteria: State concrete verification commands, expected outcomes, and untouched boundaries.",
+            "1. Imperative voice inside fence (never 3rd-person).",
+            '2. Scale depth to task; merge simple sections; no buzzwords ("comprehensive", "robust").',
+            f'3. Keep paths, symbols, flags, numbers, URLs, errors & negative constraints ("do not modify X") from <{raw_tag}> verbatim.',
+            "4. Label unconfirmed defaults as revocable assumptions.",
+            "5. Give concrete verification commands, outcomes & untouched boundaries.",
         ]
     )
 

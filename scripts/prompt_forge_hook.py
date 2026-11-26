@@ -3,19 +3,19 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import os
-import re
 import sys
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+if TYPE_CHECKING:
+    from pathlib import Path
+
 TRANSCRIPT_INITIAL_TAIL_BYTES = 131072
+_HOST_ENVELOPE_TAGS = ("ADDITIONAL_METADATA", "USER_SETTINGS_CHANGE", "CONTEXT_SUMMARY")
 
 
 def _resolve_transcript_path(payload: dict[str, Any]) -> Path | None:
+    from pathlib import Path
+
     raw_tr = str(payload.get("transcriptPath") or "").strip()
     if raw_tr:
         p = Path(raw_tr).expanduser()
@@ -46,6 +46,9 @@ def _load_recent_transcript_steps(
 ) -> list[dict[str, Any]]:
     if tr_path is None:
         return []
+    import json
+    import os
+
     try:
         with tr_path.open("rb") as fh:
             file_size = fh.seek(0, os.SEEK_END)
@@ -83,6 +86,29 @@ def _load_recent_transcript_steps(
         return []
 
 
+def _consume_balanced_host_tag(text: str, pos: int) -> tuple[str | None, int, bool]:
+    for tag in _HOST_ENVELOPE_TAGS:
+        open_tok = f"<{tag}>"
+        if not text.startswith(open_tok, pos):
+            continue
+        close_tok = f"</{tag}>"
+        depth = 1
+        cur = pos + len(open_tok)
+        while depth > 0:
+            next_open = text.find(open_tok, cur)
+            next_close = text.find(close_tok, cur)
+            if next_close < 0:
+                return tag, len(text), False
+            if 0 <= next_open < next_close:
+                depth += 1
+                cur = next_open + len(open_tok)
+            else:
+                depth -= 1
+                cur = next_close + len(close_tok)
+        return tag, cur, True
+    return None, pos, False
+
+
 def _match_host_envelope_tail(tail: str, *, truncated: bool) -> bool:
     pos = 0
     n = len(tail)
@@ -91,22 +117,15 @@ def _match_host_envelope_tail(tail: str, *, truncated: bool) -> bool:
             pos += 1
         if pos >= n:
             return True
-        matched_tag = False
-        for tag in ("ADDITIONAL_METADATA", "USER_SETTINGS_CHANGE"):
-            open_tok = f"<{tag}>"
-            close_tok = f"</{tag}>"
-            if tail.startswith(open_tok, pos):
-                end_idx = tail.find(close_tok, pos + len(open_tok))
-                if end_idx >= 0:
-                    pos = end_idx + len(close_tok)
-                    matched_tag = True
-                    break
+        tag, next_pos, closed = _consume_balanced_host_tag(tail, pos)
+        if tag is not None:
+            if not closed:
                 return truncated
-        if matched_tag:
+            pos = next_pos
             continue
         if truncated:
             rem = tail[pos:]
-            if any(f"<{tag}>".startswith(rem) for tag in ("ADDITIONAL_METADATA", "USER_SETTINGS_CHANGE")):
+            if any(f"<{t}>".startswith(rem) for t in _HOST_ENVELOPE_TAGS):
                 return True
         return False
     return True
@@ -160,6 +179,16 @@ def _step_matches_input(step: dict[str, Any], raw_input: str) -> bool:
     left = content.lstrip()
     if not left:
         return False
+    if left.startswith("<") and not left.startswith("<USER_REQUEST>"):
+        cand_left = left
+        while True:
+            tag, next_pos, closed = _consume_balanced_host_tag(cand_left, 0)
+            if tag is None or not closed:
+                break
+            cand_left = cand_left[next_pos:].lstrip()
+            if cand_left.startswith("<USER_REQUEST>"):
+                left = cand_left
+                break
     if not left.startswith("<USER_REQUEST>"):
         if not is_truncated:
             return content in targets or content.strip() in targets
@@ -328,6 +357,8 @@ def main() -> None:
         print("{}")
         return
 
+    import json
+
     try:
         payload = json.loads(raw_stdin)
         if not isinstance(payload, dict):
@@ -341,8 +372,12 @@ def main() -> None:
         print("{}")
         return
 
-    if str(SCRIPT_DIR) not in sys.path:
-        sys.path.insert(0, str(SCRIPT_DIR))
+    import hashlib
+    from pathlib import Path
+
+    script_dir = Path(__file__).resolve().parent
+    if str(script_dir) not in sys.path:
+        sys.path.insert(0, str(script_dir))
     import prompt_forge_core as core  # noqa: E402
 
     try:

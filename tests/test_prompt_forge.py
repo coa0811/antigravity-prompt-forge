@@ -2825,6 +2825,562 @@ class PromptForgeTests(unittest.TestCase):
         self.assertIn("直接在当前会话调用 run_workflow 按优化稿执行", sys_msg)
         self.assertIn("按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）", sys_msg)
 
+    # 7. v0.5.0 Context Summary, Path/Cache Optimizations, Inline Modifiers & CLI Route
+    def test_hook_context_summary_compact_and_lazy_imports(self) -> None:
+        tr = self.root / "compact_transcript.jsonl"
+        prompt_text = "++code compact handoff"
+        nested_summary = (
+            "<CONTEXT_SUMMARY>\nEarlier summary\n"
+            "<CONTEXT_SUMMARY>nested literal inside summary</CONTEXT_SUMMARY>\n"
+            "Done.\n</CONTEXT_SUMMARY>"
+        )
+        wrapped_compact = (
+            f"{nested_summary}\n"
+            f"<USER_REQUEST>\n{prompt_text}\n</USER_REQUEST>\n"
+            "<ADDITIONAL_METADATA>\n2026-11-26T00:00:00Z\n</ADDITIONAL_METADATA>"
+        )
+        step_compact = {
+            "step_index": 100,
+            "type": "USER_INPUT",
+            "source": "USER_EXPLICIT",
+            "content": wrapped_compact,
+        }
+        self.assertTrue(hook._step_matches_input(step_compact, prompt_text))
+        self.assertFalse(hook._step_matches_input(step_compact, "++code other"))
+
+        _write_transcript(tr, [step_compact])
+        compact_payload = {
+            "conversationId": "conv-compact",
+            "transcriptPath": str(tr),
+            "workspacePaths": [str(self.workspace)],
+            "lastUserInput": prompt_text,
+            "invocationNum": 1,
+            "initialNumSteps": 101,
+        }
+        out0 = self._run_hook(compact_payload)
+        self.assertIn("injectSteps", out0)
+        self.assertEqual(
+            json.loads((self.data_dir / "sessions" / "conv-compact.json").read_text(encoding="utf-8"))["lastUserStepIndex"],
+            100,
+        )
+
+        _write_transcript(
+            tr,
+            [
+                step_compact,
+                {"step_index": 101, "type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [{"name": "exit_plan_mode"}]},
+                {"step_index": 102, "type": "SYSTEM_MESSAGE", "status": "DONE", "content": "Plan mode is off:"},
+            ],
+        )
+        self.assertEqual(self._run_hook({**compact_payload, "invocationNum": 1, "initialNumSteps": 104}), {})
+
+        # Trailing <CONTEXT_SUMMARY> intact and truncated (nested + partial prefix) match cleanly
+        tail_prompt = "++code trailing summary"
+        trailing_intact = {
+            "step_index": 110,
+            "type": "USER_INPUT",
+            "source": "USER_EXPLICIT",
+            "content": (
+                f"<USER_REQUEST>\n{tail_prompt}\n</USER_REQUEST>\n"
+                "<CONTEXT_SUMMARY>\nOuter <CONTEXT_SUMMARY>inner</CONTEXT_SUMMARY>\n</CONTEXT_SUMMARY>"
+            ),
+        }
+        self.assertTrue(hook._step_matches_input(trailing_intact, tail_prompt))
+
+        for trunc_tail in (
+            f"<USER_REQUEST>\n{tail_prompt}\n</USER_REQUEST>\n<CONTEXT_SUMMARY>\n<CONTEXT_SUMMARY>inner</CONTEXT_SUMMARY>\npartial",
+            f"<USER_REQUEST>\n{tail_prompt}\n</USER_REQUEST>\n<CONTEXT",
+        ):
+            self.assertTrue(
+                hook._step_matches_input(
+                    {"step_index": 111, "type": "USER_INPUT", "source": "USER_EXPLICIT", "content": trunc_tail, "truncated_fields": ["content"]},
+                    tail_prompt,
+                )
+            )
+            self.assertFalse(
+                hook._step_matches_input(
+                    {"step_index": 111, "type": "USER_INPUT", "source": "USER_EXPLICIT", "content": trunc_tail},
+                    tail_prompt,
+                )
+            )
+
+        # Bare unwrapped prompts beginning with host tags must still require exact match
+        bare_meta_step = {"step_index": 120, "type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "<ADDITIONAL_METADATA>foo"}
+        self.assertTrue(hook._step_matches_input(bare_meta_step, "<ADDITIONAL_METADATA>foo"))
+        self.assertFalse(hook._step_matches_input(bare_meta_step, "foo"))
+        bare_summary_step = {
+            "step_index": 121,
+            "type": "USER_INPUT",
+            "source": "USER_EXPLICIT",
+            "content": "<CONTEXT_SUMMARY>foo</CONTEXT_SUMMARY>\n++code bare",
+        }
+        self.assertFalse(hook._step_matches_input(bare_summary_step, "++code bare"))
+
+        # Fresh subprocess fast-path: hook.main() on plain input must not load heavy stdlib/core modules
+        proc = subprocess.run(
+            [
+                str(SCRIPTS_DIR / "run_python.sh"),
+                "-c",
+                (
+                    "import io, sys; "
+                    "pre = set(sys.modules); "
+                    f"sys.path.insert(0, {str(SCRIPTS_DIR)!r}); "
+                    "import prompt_forge_hook as h; "
+                    "sys.stdin = io.StringIO('{\"lastUserInput\": \"plain question\"}'); "
+                    "h.main(); "
+                    "added = set(sys.modules) - pre; "
+                    "assert all(m not in added for m in ('hashlib', 're', 'pathlib', 'prompt_forge_core')), added; "
+                    "assert all(m not in sys.modules for m in ('hashlib', 'pathlib', 'prompt_forge_core')); "
+                    "assert not hasattr(h, 're')"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        self.assertEqual(proc.stdout.strip(), "{}")
+
+    def test_single_path_resolution_workspace_root_and_caches(self) -> None:
+        (self.workspace / ".cache_dir").mkdir()
+        (self.workspace / ".cache_dir" / "a.py").write_text("x = 1\n", encoding="utf-8")
+        (self.workspace / "src").mkdir()
+        src_a = self.workspace / "src" / "a.py"
+        src_b = self.workspace / "src" / "b.py"
+        src_c = self.workspace / "src" / "c.py"
+        src_d = self.workspace / "src" / "d.py"
+        for p in (src_a, src_b, src_c, src_d):
+            p.write_text("pass\n", encoding="utf-8")
+
+        rules_dir = self.workspace / ".claude" / "rules"
+        rules_dir.mkdir(parents=True)
+        (rules_dir / "src.md").write_text('---\npaths:\n  - "src/**"\n---\n# Src rule\n- Keep pure.\n', encoding="utf-8")
+
+        with mock.patch.object(core, "_resolve_prompt_path_tokens", wraps=core._resolve_prompt_path_tokens) as spy_resolve:
+            ctx = core.collect_workspace_context([str(self.workspace)], "检查 @[src/a.py]")
+        self.assertEqual(spy_resolve.call_count, 1)
+        self.assertIn("src/a.py", ctx["mentioned_paths"])
+        self.assertIn(".claude/rules/src.md", [r["file"] for r in ctx["rules"]])
+
+        # Workspace-rooted path probing counts 2 in-workspace files (.cache_dir/a.py + src/b.py or abs src/a.py + src/b.py)
+        # while rejecting external host path /etc/hosts (so 4 in-ws files + /etc/hosts stays <= 4 -> "none").
+        ws_ctx = {"workspace_path": str(self.workspace)}
+        for prompt_two in (
+            "逐一检查 .cache_dir/a.py 和 src/b.py，参考 /etc/hosts 并汇总",
+            f"逐一检查 {src_a} 和 {src_b}，参考 /etc/hosts 并汇总",
+        ):
+            seen_tokens: list[list[tuple[str, str | None]]] = []
+            orig_resolve_tokens = core._resolve_prompt_path_tokens
+
+            def capture_tokens(root: Path, text: str) -> list[tuple[str, str | None]]:
+                res = orig_resolve_tokens(root, text)
+                seen_tokens.append(res)
+                return res
+
+            with mock.patch.object(core, "_resolve_prompt_path_tokens", side_effect=capture_tokens) as spy_tok:
+                rec_two = core.recommend_execution_tool(prompt_two, workspace_ctx=ws_ctx)
+            self.assertEqual(rec_two["tool"], "none")
+            self.assertEqual(spy_tok.call_count, 1)
+            self.assertEqual(len(seen_tokens[0]), 2)
+
+        rec_four_plus_ext = core.recommend_execution_tool(
+            f"逐一检查 {src_a}、{src_b}、{src_c}、{src_d}，对比 /etc/hosts 并汇总",
+            workspace_ctx=ws_ctx,
+        )
+        self.assertEqual(rec_four_plus_ext["tool"], "none")
+
+        # workspace_ctx=None uses pure lexical path extraction with 0 Path.resolve() calls
+        with mock.patch.object(Path, "resolve", side_effect=AssertionError("Path.resolve must not run without workspace_ctx")):
+            rec_lex = core.recommend_execution_tool("批量检查 a.py 和 b.py，结果写入 report.md", workspace_ctx=None)
+        self.assertEqual(rec_lex["tool"], "none")
+
+        # _glob_to_regex LRU cache hit & immutable load_builtin_templates copy
+        core._glob_to_regex.cache_clear()
+        self.assertTrue(core._rule_pattern_matches("src/**/*.py", ["src/a.py"], ""))
+        self.assertTrue(core._rule_pattern_matches("src/**/*.py", ["src/b.py"], ""))
+        self.assertGreaterEqual(core._glob_to_regex.cache_info().hits, 1)
+
+        t1 = core.load_builtin_templates()
+        t1["code"]["keywords"].append("__MUTATED_MARKER__")
+        t1["__injected__"] = {"id": "__injected__", "sections": ["x"]}
+        t2 = core.load_builtin_templates()
+        self.assertNotIn("__MUTATED_MARKER__", t2["code"]["keywords"])
+        self.assertNotIn("__injected__", t2)
+
+    def test_inline_routing_modifiers_and_cli_route(self) -> None:
+        custom = {"bio-assay"}
+        cases = (
+            ("++notool fix auth", ("confirm", "auto", False, "fix auth", "off")),
+            ("++direct fix auth", ("confirm", "auto", False, "fix auth", "off")),
+            ("++autotool fix auth", ("confirm", "auto", False, "fix auth", "auto")),
+            ("++only:notool fix auth", ("only", "auto", False, "fix auth", "off")),
+            ("++code:direct fix auth", ("confirm", "code", True, "fix auth", "off")),
+            ("++only:code:notool fix auth", ("only", "code", True, "fix auth", "off")),
+            ("++notool:bio-assay:go design ELISA", ("execute", "bio-assay", True, "design ELISA", "off")),
+        )
+        for text, expected in cases:
+            m = core.parse_trigger(text, custom_template_ids=custom)
+            self.assertIsNotNone(m, f"Expected match for {text!r}")
+            assert m is not None
+            self.assertEqual(
+                (m.mode, m.scenario, m.scenario_explicit, m.raw_prompt, m.tool_routing_override),
+                expected,
+            )
+
+        for bad in ("++notool", "++notool   ", "++notool:direct task", "++only:code:extra task"):
+            self.assertIsNone(core.parse_trigger(bad, custom_template_ids=custom), f"Should NOT match: {bad!r}")
+
+        for reserved in ("notool", "direct", "autotool"):
+            with self.assertRaises(ValueError):
+                core.save_custom_template(reserved, {"sections": ["Goal"]})
+
+        # Hook integration: inline modifiers override routing per-turn without mutating PREFS_PATH
+        (self.workspace / "main.py").write_text("print(1)\n", encoding="utf-8")
+        core.update_preferences(tool_routing="auto")
+        prefs_auto_raw = core.PREFS_PATH.read_text(encoding="utf-8")
+        out_notool = self._run_hook(
+            {
+                "conversationId": "conv-notool",
+                "lastUserInput": "++notool 遍历 20 个模块文件并汇总",
+                "workspacePaths": [str(self.workspace)],
+            }
+        )
+        pkt_notool = out_notool["injectSteps"][0]["systemMessage"]["systemMessage"]
+        self.assertNotIn("EXECUTION TOOL ROUTING", pkt_notool)
+        self.assertEqual(core.PREFS_PATH.read_text(encoding="utf-8"), prefs_auto_raw)
+
+        core.update_preferences(tool_routing="off")
+        prefs_off_raw = core.PREFS_PATH.read_text(encoding="utf-8")
+        out_autotool = self._run_hook(
+            {
+                "conversationId": "conv-autotool",
+                "lastUserInput": "++autotool 遍历 20 个模块文件并汇总",
+                "workspacePaths": [str(self.workspace)],
+            }
+        )
+        pkt_autotool = out_autotool["injectSteps"][0]["systemMessage"]["systemMessage"]
+        self.assertIn("EXECUTION TOOL ROUTING", pkt_autotool)
+        self.assertIn("tool=/run-workflow", pkt_autotool)
+        self.assertEqual(core.PREFS_PATH.read_text(encoding="utf-8"), prefs_off_raw)
+
+        # ++prefs packet documents --tool-routing and route diagnostic subcommand
+        out_prefs = self._run_hook(
+            {
+                "conversationId": "conv-prefs-v05",
+                "lastUserInput": "++prefs",
+                "workspacePaths": [str(self.workspace)],
+            }
+        )
+        pkt_prefs = out_prefs["injectSteps"][0]["systemMessage"]["systemMessage"]
+        self.assertIn("--tool-routing", pkt_prefs)
+        self.assertIn("route", pkt_prefs)
+
+        # CLI route subcommand
+        def run_cli(*argv: str) -> tuple[int, str, str]:
+            out_buf, err_buf = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+                rc_val = cli.main(["--data-dir", str(self.data_dir), *argv])
+            return rc_val, out_buf.getvalue(), err_buf.getvalue()
+
+        rc_json, out_json, _ = run_cli(
+            "route",
+            "--workspace",
+            str(self.workspace),
+            "--prompt",
+            "检查 @[main.py] 并按 20 个模块批量汇总",
+            "--format",
+            "json",
+        )
+        self.assertEqual(rc_json, 0)
+        parsed_route = json.loads(out_json)
+        self.assertEqual(parsed_route["tool"], "/run-workflow")
+        self.assertEqual(parsed_route["tool_routing_pref"], "off")
+        self.assertEqual(parsed_route["workspace"], str(self.workspace.resolve()))
+        self.assertIn("main.py", parsed_route["mentioned_paths"])
+
+        rc_text, out_text, _ = run_cli(
+            "route",
+            "--workspace",
+            str(self.workspace),
+            "--prompt",
+            "修复 main.py",
+            "--format",
+            "text",
+        )
+        self.assertEqual(rc_text, 0)
+        self.assertIn("tool=none", out_text)
+        self.assertIn("reason:", out_text)
+
+        rc_nows, out_nows, _ = run_cli(
+            "route",
+            "--no-workspace",
+            "--prompt",
+            "批量检查 a.py 和 b.py，结果写入 report.md",
+            "--format",
+            "json",
+        )
+        self.assertEqual(rc_nows, 0)
+        parsed_nows = json.loads(out_nows)
+        self.assertEqual(parsed_nows["tool"], "none")
+        self.assertIsNone(parsed_nows["workspace"])
+        self.assertEqual(parsed_nows["mentioned_paths"], [])
+
+        rc_empty, _, err_empty = run_cli("route", "--prompt", "")
+        self.assertEqual(rc_empty, 2)
+        self.assertIn("Error:", err_empty)
+
+    def test_astra_round1_regressions_legacy_templates_absent_root_cjk_atmention_and_off_packet(self) -> None:
+        # 1. Legacy v0.4 custom templates whose IDs became reserved (e.g. direct/notool/autotool)
+        # must NOT be erased when saving/deleting other templates, and remain retrievable/deletable.
+        core.ensure_data_dirs()
+        core.TEMPLATES_PATH.write_text(
+            json.dumps(
+                {
+                    "direct": {
+                        "id": "direct",
+                        "name": "Legacy Direct",
+                        "description": "v0.4 user template",
+                        "keywords": ["legacy"],
+                        "sections": ["Goal", "Verify"],
+                        "clarifying_focus": [],
+                        "verification_hints": [],
+                    }
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        core.save_custom_template("other", {"name": "Other", "sections": ["Goal"]})
+        raw_after_save = json.loads(core.TEMPLATES_PATH.read_text(encoding="utf-8"))
+        self.assertIn("direct", raw_after_save)
+        self.assertIn("other", raw_after_save)
+        self.assertIsNone(core.parse_trigger("++:direct task", custom_template_ids=set(core.load_all_templates(include_reserved=True))))
+        with self.assertRaises(ValueError):
+            core.save_custom_template("direct", {"sections": ["Overwrite"]})
+
+        def run_cli(*argv: str) -> tuple[int, str]:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc_val = cli.main(["--data-dir", str(self.data_dir), *argv])
+            return rc_val, buf.getvalue()
+
+        rc_list, list_out = run_cli("template", "list")
+        self.assertEqual(rc_list, 0)
+        listed = {item["id"]: item for item in json.loads(list_out)}
+        self.assertIn("direct", listed)
+        self.assertTrue(listed["direct"].get("legacy_reserved"))
+
+        rc_show, show_out = run_cli("template", "show", "direct")
+        self.assertEqual(rc_show, 0)
+        self.assertEqual(json.loads(show_out)["name"], "Legacy Direct")
+
+        rc_del, _ = run_cli("template", "delete", "direct")
+        self.assertEqual(rc_del, 0)
+        raw_after_del = json.loads(core.TEMPLATES_PATH.read_text(encoding="utf-8"))
+        self.assertNotIn("direct", raw_after_del)
+        self.assertIn("other", raw_after_del)
+
+        # 2. Leading '/' outside workspace must NOT probe host '/' or diverge between /etc/e.py and /__pf_absent__/e.py.
+        (self.workspace / "src").mkdir(exist_ok=True)
+        for name in ("a.py", "b.py", "c.py", "d.py"):
+            (self.workspace / "src" / name).write_text("pass\n", encoding="utf-8")
+        ws_ctx = core.collect_workspace_context([str(self.workspace)], "init")
+        rec_etc = core.recommend_execution_tool(
+            "逐一检查 src/a.py、src/b.py、src/c.py、src/d.py 和 /etc/e.py 并汇总",
+            workspace_ctx=ws_ctx,
+        )
+        rec_abs = core.recommend_execution_tool(
+            "逐一检查 src/a.py、src/b.py、src/c.py、src/d.py 和 /__pf_absent__/e.py 并汇总",
+            workspace_ctx=ws_ctx,
+        )
+        self.assertEqual(rec_etc["tool"], "none")
+        self.assertEqual(rec_abs["tool"], "none")
+
+        orig_lstat = os.lstat
+        ws_abs_prefixes = (
+            os.path.abspath(str(self.workspace)),
+            str(self.workspace.resolve()),
+        )
+        ws_allowed_ancestors = {
+            str(anc)
+            for pref in ws_abs_prefixes
+            for anc in Path(pref).parents
+        }
+
+        def spy_lstat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+            ps = os.path.abspath(os.fspath(path))
+            if ps not in ws_allowed_ancestors and not any(
+                ps == pref or ps.startswith(pref + os.sep) for pref in ws_abs_prefixes
+            ):
+                raise AssertionError(f"Must not lstat path outside workspace: {ps}")
+            return orig_lstat(path, *args, **kwargs)
+
+        with mock.patch("os.lstat", side_effect=spy_lstat):
+            rec_abs_nolstat = core.recommend_execution_tool(
+                "逐一检查 src/a.py、src/b.py、src/c.py、src/d.py 和 /__pf_absent__/e.py 并汇总",
+                workspace_ctx=ws_ctx,
+            )
+            rec_etc_nolstat = core.recommend_execution_tool(
+                "逐一检查 src/a.py、src/b.py、src/c.py、src/d.py 和 /etc/e.py 并汇总",
+                workspace_ctx=ws_ctx,
+            )
+        self.assertEqual(rec_abs_nolstat["tool"], "none")
+        self.assertEqual(rec_etc_nolstat["tool"], "none")
+
+        # 3. Explicit @[...] and backtick paths containing CJK punctuation (docs/甲、乙.md) must NOT be split,
+        # while command snippets inside backticks must still expose path arguments.
+        (self.workspace / "docs").mkdir(exist_ok=True)
+        cjk_punct_file = self.workspace / "docs" / "甲、乙.md"
+        cjk_punct_file.write_text("# Doc\n", encoding="utf-8")
+        ctx_cjk_at = core.collect_workspace_context([str(self.workspace)], "检查 @[docs/甲、乙.md]")
+        self.assertIn("docs/甲、乙.md", ctx_cjk_at["mentioned_paths"])
+        ctx_cjk_bt = core.collect_workspace_context([str(self.workspace)], "检查 `docs/甲、乙.md`")
+        self.assertIn("docs/甲、乙.md", ctx_cjk_bt["mentioned_paths"])
+
+        (self.workspace / "scripts").mkdir(exist_ok=True)
+        (self.workspace / "scripts" / "tool_cli.py").write_text("print('ok')\n", encoding="utf-8")
+        (self.workspace / "README.md").write_text("# Readme\n", encoding="utf-8")
+        ctx_bt_cmd = core.collect_workspace_context(
+            [str(self.workspace)],
+            "运行 `python3 scripts/tool_cli.py --help` 检查输出",
+        )
+        self.assertIn("scripts/tool_cli.py", ctx_bt_cmd["mentioned_paths"])
+        for single_cmd in ("`wc README.md`", "`head README.md`", "`wc tool_cli.py`"):
+            ctx_single_cmd = core.collect_workspace_context(
+                [str(self.workspace)],
+                f"运行 {single_cmd} 查看详情",
+            )
+            if "tool_cli.py" in single_cmd:
+                self.assertIn("scripts/tool_cli.py", ctx_single_cmd["mentioned_paths"])
+            else:
+                self.assertIn("README.md", ctx_single_cmd["mentioned_paths"])
+
+        with mock.patch("os.lstat", side_effect=spy_lstat):
+            ctx_ext_bt = core.collect_workspace_context(
+                [str(self.workspace)],
+                f"运行 `wc /../../../etc/e.py`、`head /__pf_absent__/e.py` 和 `{self.workspace}/../sibling/e.py` 检查",
+            )
+            rec_ext_bt = core.recommend_execution_tool(
+                "逐一检查 src/a.py、src/b.py、src/c.py、src/d.py、`wc /../../../etc/e.py` 和 `head /__pf_absent__/e.py` 并汇总",
+                workspace_ctx=ctx_ext_bt,
+            )
+        self.assertEqual(ctx_ext_bt["mentioned_paths"], [])
+        self.assertEqual(rec_ext_bt["tool"], "none")
+
+        spaced_nested = self.workspace / "audit file" / "review-pack" / "claude-opus-4.6"
+        spaced_nested.mkdir(parents=True, exist_ok=True)
+        spaced_abs_file = spaced_nested / "README.md"
+        spaced_abs_file.write_text("# Nested\n", encoding="utf-8")
+        ctx_bt_spaced_abs = core.collect_workspace_context(
+            [str(self.workspace)],
+            f"核对 `{spaced_abs_file}` 内容",
+        )
+        self.assertIn("audit file/review-pack/claude-opus-4.6/README.md", ctx_bt_spaced_abs["mentioned_paths"])
+
+        # Workspace-prefixed absolute paths containing '..' across symlinks must resolve real symlink target
+        # BEFORE collapsing '..', matching relative symlink resolution identically.
+        cellar_v1 = self.workspace / "cellar" / "v1"
+        (cellar_v1 / "sub").mkdir(parents=True)
+        (cellar_v1 / "target.py").write_text("ok = True\n", encoding="utf-8")
+        (self.workspace / "opt").mkdir(exist_ok=True)
+        try:
+            (self.workspace / "opt" / "cur").symlink_to(cellar_v1 / "sub")
+            (self.workspace / "opt" / "deep_pkg").symlink_to(cellar_v1 / "sub")
+            (self.workspace / "bin").mkdir(exist_ok=True)
+            (self.workspace / "bin" / "tool.py").write_text("ok = True\n", encoding="utf-8")
+            rel_symlink_toks = core._resolve_prompt_path_tokens(
+                self.workspace,
+                "opt/cur/../target.py",
+            )
+            abs_symlink_toks = core._resolve_prompt_path_tokens(
+                self.workspace,
+                f"{self.workspace}/opt/cur/../target.py",
+            )
+            self.assertEqual(rel_symlink_toks, [("cellar/v1/target.py", "cellar/v1/target.py")])
+            self.assertEqual(abs_symlink_toks, [("cellar/v1/target.py", "cellar/v1/target.py")])
+
+            # Multi-level '..' across a deeper in-workspace symlink staying inside root (lexically '../bin/tool.py')
+            with mock.patch("os.lstat", side_effect=spy_lstat):
+                rel_deep_sym = core._resolve_prompt_path_tokens(
+                    self.workspace,
+                    "@[opt/deep_pkg/../../../bin/tool.py]",
+                )
+                abs_deep_sym = core._resolve_prompt_path_tokens(
+                    self.workspace,
+                    f"@[{self.workspace}/opt/deep_pkg/../../../bin/tool.py]",
+                )
+            self.assertEqual(rel_deep_sym, [("bin/tool.py", "bin/tool.py")])
+            self.assertEqual(abs_deep_sym, [("bin/tool.py", "bin/tool.py")])
+
+            # Symlinks inside workspace pointing outside (relative sibling, absolute sibling, '/' or '<ws>/../sibling')
+            # must return empty, actually exercise _safe_resolve_within_root, and trigger zero external os.lstat probes.
+            ext_cellar = self.root / "ext_cellar"
+            ext_cellar.mkdir(exist_ok=True)
+            (ext_cellar / "sample.py").write_text("ext = True\n", encoding="utf-8")
+            (self.workspace / "ext_rel_link").symlink_to(Path("..") / "ext_cellar")
+            (self.workspace / "ext_abs_link").symlink_to(ext_cellar)
+            (self.workspace / "alias_root").symlink_to("/")
+            (self.workspace / "alias_escape").symlink_to(f"{self.workspace}/../ext_cellar")
+            with mock.patch("os.lstat", side_effect=spy_lstat), mock.patch.object(
+                core, "_safe_resolve_within_root", wraps=core._safe_resolve_within_root
+            ) as spy_safe_res:
+                self.assertEqual(
+                    core._resolve_prompt_path_tokens(self.workspace, "ext_rel_link/sample.py"),
+                    [],
+                )
+                self.assertEqual(
+                    core._resolve_prompt_path_tokens(self.workspace, "ext_abs_link/sample.py"),
+                    [],
+                )
+                self.assertEqual(
+                    core._resolve_prompt_path_tokens(self.workspace, "@[alias_root/README.md]"),
+                    [],
+                )
+                self.assertEqual(
+                    core._resolve_prompt_path_tokens(self.workspace, "@[alias_escape/README.md]"),
+                    [],
+                )
+                rec_ext_sym = core.recommend_execution_tool(
+                    "逐一检查 src/a.py、src/b.py、src/c.py、src/d.py、`ext_rel_link/sample.py` 并汇总",
+                    workspace_ctx=ws_ctx,
+                )
+            self.assertGreaterEqual(spy_safe_res.call_count, 5)
+            self.assertEqual(rec_ext_sym["tool"], "none")
+        except OSError:
+            pass
+
+        # 4. tool_routing=off & ++notool packets must preserve no-slash & omit-summary rules.
+        core.update_preferences(tool_routing="auto")
+        out_notool = self._run_hook(
+            {
+                "conversationId": "conv-notool-off-rule",
+                "lastUserInput": "++notool 检查 src/a.py",
+                "workspacePaths": [str(self.workspace)],
+            }
+        )
+        pkt_notool = out_notool["injectSteps"][0]["systemMessage"]["systemMessage"]
+        self.assertNotIn("EXECUTION TOOL ROUTING", pkt_notool)
+        self.assertIn("NO leading `/` command prefix", pkt_notool)
+        self.assertIn("执行工具建议", pkt_notool)
+
+        rc_pkt_off, pkt_off_json = run_cli(
+            "packet",
+            "--workspace",
+            str(self.workspace),
+            "--tool-routing",
+            "off",
+            "--prompt",
+            "检查 src/a.py",
+            "--format",
+            "json",
+        )
+        self.assertEqual(rc_pkt_off, 0)
+        pkt_off = json.loads(pkt_off_json)["packet"]
+        self.assertNotIn("EXECUTION TOOL ROUTING", pkt_off)
+        self.assertIn("NO leading `/` command prefix", pkt_off)
+        self.assertIn("执行工具建议", pkt_off)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -143,25 +143,30 @@ def _cmd_prefs(args: argparse.Namespace) -> int:
 def _cmd_template(args: argparse.Namespace) -> int:
     action = args.template_action
     if action == "list":
-        templates = core.load_all_templates()
-        summary = [
-            {
+        templates = core.load_all_templates(include_reserved=True)
+        summary = []
+        for tid, tpl in templates.items():
+            entry: dict[str, Any] = {
                 "id": tid,
                 "name": tpl["name"],
                 "custom": bool(tpl.get("custom")),
                 "description": tpl.get("description", ""),
             }
-            for tid, tpl in templates.items()
-        ]
+            if tpl.get("custom") and tid in core.RESERVED_TEMPLATE_IDS:
+                entry["legacy_reserved"] = True
+            summary.append(entry)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0
     if action == "show":
-        templates = core.load_all_templates()
+        templates = core.load_all_templates(include_reserved=True)
         tid = args.id.strip().lower()
         if tid not in templates:
             print(f"Error: template '{tid}' not found.", file=sys.stderr)
             return 1
-        print(json.dumps(templates[tid], ensure_ascii=False, indent=2))
+        out_tpl = dict(templates[tid])
+        if out_tpl.get("custom") and tid in core.RESERVED_TEMPLATE_IDS:
+            out_tpl["legacy_reserved"] = True
+        print(json.dumps(out_tpl, ensure_ascii=False, indent=2))
         return 0
     if action == "save":
         spec: dict[str, Any]
@@ -187,6 +192,42 @@ def _cmd_template(args: argparse.Namespace) -> int:
         print(json.dumps({"id": args.id.strip().lower(), "deleted": deleted}, ensure_ascii=False, indent=2))
         return 0 if deleted else 1
     return 2
+
+
+def _cmd_route(args: argparse.Namespace) -> int:
+    raw_prompt = _read_prompt_arg(args.prompt, args.prompt_file)
+    if not raw_prompt:
+        print("Error: --prompt or --prompt-file must provide a non-empty prompt.", file=sys.stderr)
+        return 2
+    prefs = core.load_preferences()
+    if args.no_workspace:
+        ctx = None
+    else:
+        ws_paths = args.workspace or [str(Path.cwd())]
+        ctx = core.collect_workspace_context(ws_paths, raw_prompt)
+    rec = core.recommend_execution_tool(raw_prompt, ctx)
+    pref_val = prefs.get("tool_routing", "auto")
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "tool_routing_pref": pref_val,
+                    "workspace": ctx["workspace_path"] if ctx else None,
+                    "mentioned_paths": ctx["mentioned_paths"] if ctx else [],
+                    **rec,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        print(
+            f"tool={rec['tool']} (confidence={rec['confidence']}, scope={rec['execution_scope']}, pref={pref_val})"
+        )
+        print(f"reason: {rec['reason']}")
+        if rec.get("signals"):
+            print("signals: " + ", ".join(str(s) for s in rec["signals"]))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -242,6 +283,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_tdel = tpl_sub.add_parser("delete")
     p_tdel.add_argument("id")
 
+    p_route = sub.add_parser("route", help="Inspect execution tool routing recommendation for a prompt")
+    p_route.add_argument("--workspace", action="append", help="Workspace directory path (repeatable)")
+    p_route.add_argument("--no-workspace", action="store_true", help="Skip workspace inspection and route lexically")
+    p_route.add_argument("--prompt", help="Raw prompt text")
+    p_route.add_argument("--prompt-file", help="Path to file containing prompt, or '-' for stdin")
+    p_route.add_argument("--format", choices=["json", "text"], default="json")
+
     return parser
 
 
@@ -257,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_prefs(args)
         if args.command == "template":
             return _cmd_template(args)
+        if args.command == "route":
+            return _cmd_route(args)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2

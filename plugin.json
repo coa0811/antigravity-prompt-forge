@@ -2,7 +2,7 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "prompt-forge",
   "displayName": "Prompt Forge",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "logo": "assets/logo.svg",
   "description": "Explicit ++ and skill-triggered prompt optimizer that enriches raw instructions with workspace context, execution tool routing (/swarm, /teamwork, /run-workflow, /boost, or none), smart clarifying questions, scenario templates, and cross-project personal preferences.",
   "suggestedPrompts": [

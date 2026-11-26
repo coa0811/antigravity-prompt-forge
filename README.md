@@ -16,6 +16,7 @@
 | `++go 补全测试并跑一遍` | `execute`（别名 `run`） | 自动识别 | 展示要点后直接按优化稿执行 |
 | `++code 重构缓存模块` | 默认（初始为 `confirm`） | `code` | 指定场景（支持 `code`/`plan`/`research`/`doc`/`general`） |
 | `++only:research 对比两个靶点` | `only` | `research` | 组合模式 + 场景 |
+| `++notool <指令>` / `++direct <指令>` | 默认（可组合模式） | 自动/指定 | 单次关闭执行工具路由建议，可与模式/场景组合（如 `++only:notool`、`++code:direct`、`++only:code:notool`）；兼容 `++autotool` 单次强制开启 |
 | `++<custom_id> 原始指令` | 默认（初始为 `confirm`） | 自定义模板 | 使用个人保存的自定义模板（兼容 `++:<custom_id>`） |
 | `++only:<custom_id> 原始指令` | `only` | 自定义模板 | 仅输出按自定义模板优化的提示词 |
 | `++prefs` / `++prefs 新增约束：...` | `prefs` | — | 查看或修改个人偏好与模板库 |
@@ -30,7 +31,7 @@
 
 - **仓库上下文感知（只读有界）**：自动抓取项目目录树（深度 ≤ 2）、直读 `.git/HEAD` 并并发查询 Git 状态与最近提交、根目录 `AGENTS.md`/`GEMINI.md`/`CLAUDE.md` 与按 `paths:` 按需匹配的 `.claude/rules/*.md` 规则摘要（保留末尾 `NEVER`/`ALWAYS` 等红线约束）、以及原话中 `@[...]` / 中英文 / 含空格路径引用（严格过滤 `.git`、`.venv`、`node_modules` 及 `.env`/`*.key`/`*secret*` 等敏感文件）。
 - **快速低延迟**：非 `++`/`＋＋` 请求在解析 JSON 前即刻放行（不加载核心模块），并按新建会话按需清理旧会话记录。
-- **智能执行工具选型（YAGNI 默认不选）**：优化提示词时自动结合启发式信号与仓库快照评估任务是否适合 `/run-workflow`（确定性批量扇出）、`/boost`（深层根因/高强度验证）、`/swarm`（多模块并行+互审）或 `/teamwork`（0→1 端到端交付），简单常规任务默认不启用编排；命中工具时代码块首行自动附带 `/命令 ` 前缀，并在 `confirm` 模式下智能区分“当前会话直接执行”与“复制发送激活宿主斜杠命令”。可通过 `++prefs` 或 `prefs set --tool-routing off|auto` 开关。
+- **智能执行工具选型（YAGNI 默认不选）**：优化提示词时自动结合启发式信号与仓库快照评估任务是否适合 `/run-workflow`（确定性批量扇出）、`/boost`（深层根因/高强度验证）、`/swarm`（多模块并行+互审）或 `/teamwork`（0→1 端到端交付），简单常规任务默认不启用编排；命中工具时代码块首行自动附带 `/命令 ` 前缀，并在 `confirm` 模式下智能区分“当前会话直接执行”与“复制发送激活宿主斜杠命令”。可通过 `++prefs` 或 `prefs set --tool-routing off|auto` 持久化开关，或用 `++notool`/`++direct`/`++autotool` 单次覆盖，也可用 `prompt_forge_cli.py route` 单独诊断工具路由结果。
 - **智能反问补齐**：仅当存在影响方向或不可逆决策的关键未知项时，先提出 1–3 个高价值选择题；意图明确则直接生成优化稿。
 - **多场景框架**：内置 `code`、`plan`、`research`、`doc`、`general` 五套结构化模板（覆盖优化/性能/插件/前端等关键词），支持自动匹配或显式指定，并可自定义模板覆盖或扩展。
 - **跨项目个人偏好**：通过纯 Python 原子 JSON 存储于 `~/.gemini/antigravity/plugin_data/prompt-forge/`（或 `PLUGIN_DATA`），跨仓库持久化输出语言、默认模式、工具选型开关（`tool_routing`）、常用约束、避坑项与专业术语表。
