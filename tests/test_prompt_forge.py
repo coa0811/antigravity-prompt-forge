@@ -2698,6 +2698,16 @@ class PromptForgeTests(unittest.TestCase):
             workspace_ctx={"mentioned_paths": []},
         )
         self.assertEqual(rec_all_with_out["tool"], "/run-workflow")
+        rec_spec_all = core.recommend_execution_tool(
+            "按照 @[README.md] 中的规范，遍历所有插件文件，逐个计算 SHA-256 并汇总为 JSON",
+            workspace_ctx={"mentioned_paths": ["README.md"]},
+        )
+        self.assertEqual(rec_spec_all["tool"], "/run-workflow")
+        rec_spec_all_out = core.recommend_execution_tool(
+            "按照 @[README.md] 中的规范，遍历所有插件文件，逐个计算 SHA-256 并汇总为 JSON，结果写入 @[checksums.json]",
+            workspace_ctx={"mentioned_paths": ["README.md"]},
+        )
+        self.assertEqual(rec_spec_all_out["tool"], "/run-workflow")
 
         # Per-tool negation & global opt-out guards (including CJK-adjacent /swarm并行 and backticks)
         rec_neg = core.recommend_execution_tool("不用 /swarm，分三个模块并行重构并交叉验证")

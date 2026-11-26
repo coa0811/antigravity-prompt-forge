@@ -1750,7 +1750,9 @@ def recommend_execution_tool(
     if input_ref_count == 0 and mentioned_paths and not _SMALL_OUTPUT_REF_RE.search(text):
         input_ref_count = len(mentioned_paths)
     has_small_explicit_refs = 1 <= input_ref_count <= 4
-    has_scoped_explicit_list = has_small_explicit_refs and bool(_EXPLICIT_LIST_SCOPE_RE.search(text))
+    has_scoped_explicit_list = has_small_explicit_refs and bool(
+        _EXPLICIT_LIST_SCOPE_RE.search(text_for_input_refs)
+    )
     has_multi_scope = (
         len(mentioned_paths) >= 3
         or bool(_MULTI_ENUM_RE.search(text))
