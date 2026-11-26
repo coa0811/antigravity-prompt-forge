@@ -34,8 +34,8 @@ ERROR_LOG_PATH = DATA_DIR / "error.log"
 
 BUILTIN_SCENARIO_IDS = ("code", "plan", "research", "doc", "general")
 VALID_MODES = ("confirm", "only", "execute")
-EXECUTION_TOOLS = ("none", "/run-workflow", "/boost", "/swarm", "/teamwork")
-HOST_SLASH_TOOLS = ("/boost", "/swarm", "/teamwork")
+EXECUTION_TOOLS = ("none", "/run-workflow", "/boost", "/swarm", "/teamwork", "/goal", "/grill-me")
+HOST_SLASH_TOOLS = ("/boost", "/swarm", "/teamwork", "/goal", "/grill-me")
 IN_SESSION_TOOLS = ("none", "/run-workflow")
 VALID_TOOL_ROUTING = ("auto", "off")
 EXEC_MODE_ALIASES: dict[str, str] = {
@@ -1829,8 +1829,8 @@ def _pick_uncolliding_tag(base: str, *texts: str) -> str:
 
 
 _TOOL_NAME_PAT = (
-    r"(?:/(?:run[-_]workflow|boost|swarm|teamwork)(?![A-Za-z0-9_-])"
-    r"|(?<![A-Za-z0-9_-])(?:run[-_]workflow|boost|swarm|teamwork)(?![A-Za-z0-9_-]))"
+    r"(?:/(?:run[-_]workflow|boost|swarm|teamwork|goal|grill[-_]me)(?![A-Za-z0-9_-])"
+    r"|(?<![A-Za-z0-9_-])(?:run[-_]workflow|boost|swarm|teamwork|goal|grill[-_]me)(?![A-Za-z0-9_-]))"
 )
 _TOOL_NAME_RE = re.compile(_TOOL_NAME_PAT, re.IGNORECASE)
 _NEGATION_LEAD_PAT = (
@@ -1848,7 +1848,7 @@ _PER_TOOL_NEG_RE = re.compile(
     re.IGNORECASE,
 )
 _LEADING_SLASH_TOOL_RE = re.compile(
-    r"^\s*/(run[-_]workflow|boost|swarm|teamwork)(?![A-Za-z0-9_-])",
+    r"^\s*/(run[-_]workflow|boost|swarm|teamwork|goal|grill[-_]me)(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
 _EXPLICIT_ADOPT_RE = re.compile(
@@ -1864,10 +1864,15 @@ _META_QA_RE = re.compile(
     re.IGNORECASE,
 )
 _TOOL_AS_META_SUBJECT_RE = re.compile(
-    rf"(?:用|使用)?\s*{_TOOL_NAME_PAT}\s*(?:是|有|到底|该|应该|的)?\s*(?:什么|啥)?(?:区别|差异|作用|意思|原理|用法|优势|缺点|用处|用途|干嘛的|干什么的|有啥用|怎么用|怎么使用|如何使用|如何用|怎样用|怎么启用)",
+    rf"(?:用|使用)?\s*({_TOOL_NAME_PAT})(?:\s*(?:模式|指令|命令))?\s*(?:是|有|到底|该|应该|的)?\s*(?:什么|啥)?(?:区别|差异|作用|意思|原理|用法|优势|缺点|用处|用途|干嘛的|干什么的|有啥用|怎么用|怎么使用|如何使用|如何用|怎样用|怎么启用)",
     re.IGNORECASE,
 )
 _COMPARATIVE_RE = re.compile(r"还是|或者|\bor\b|\bvs\.?\b|对比|比较|哪个|选哪个|适合|区别|差异", re.IGNORECASE)
+_GOAL_ADOPT_SUFFIX_RE = re.compile(r"^\s*(?:模式|指令|命令)")
+_GOAL_NON_TOOL_NOUN_RE = re.compile(
+    r"^\s*(?:这?[个项种]?\s*)?(?:字段|参数|变量|属性|指标|配置|选项|值|列|名|类|函数|方法|对象|表|键|(?:tracker|fields?|params?|args?|vars?|metrics?|keys?|options?|columns?)(?![A-Za-z0-9_-]))",
+    re.IGNORECASE,
+)
 
 _WORK_ITEM_NOUN_PAT = (
     r"(?:文件|模块|子系统|目录|接口|端点|函数|脚本|服务|仓库|项目|页面|组件|测试用例|用例|案例|论文|文献|预印本|专利|样本|靶点|蛋白|分子|化合物|变体|基因|记录|条目|任务|报告|文档)"
@@ -1946,11 +1951,170 @@ _BOOST_DEPTH_RE = re.compile(
     re.IGNORECASE,
 )
 
+_GOAL_LOOP_RE = re.compile(
+    r"过夜|通宵|无人值守|挂机(?:跑|执行|运行)?|死磕(?:到底)?|不达标不停|不跑通不停|跑通为止"
+    r"|直到(?:(?:全部|所有|全量)(?:测试|用例|构建|检查|指标|目标)?|(?:测试|用例|构建|检查|指标|目标)).{0,12}(?:通过|达标|归零|清零|全绿|完成)才停"
+    r"|\bovernight\b|\bunattended\b|\bdon'?t\s+stop\s+until\b|\bdo\s+not\s+stop\s+until\b"
+    r"|\bkeep\s+(?:iterating|running|trying)\s+until\b|\buntil\s+all\s+(?:tests?|checks?|suites?)\s+pass\b",
+    re.IGNORECASE,
+)
+_GOAL_NEG_GUARD_RE = re.compile(
+    r"(?:不用|无需|不必|不要(?!(?:停|停止|中断))|不需要|别(?!(?:停|停止|中断))|\bnot\s+(?!stop\b)|\bnever\s+(?!stop\b)|\bno\s+|\bwithout\s+|\bdon'?t\s+(?!stop\b)|\bdo\s+not\s+(?!stop\b))",
+    re.IGNORECASE,
+)
+_GRILL_ME_RE = re.compile(
+    r"拷问我|(?:先|多)\s*问我(?:几个|一些|几轮)?问题|采访(?:式|我)|交互式访谈"
+    r"|(?:先|把)(?:需求|设计|架构|方案|边界|细节).{0,10}问透(?:再动手|再写|再实现)?"
+    r"|\bgrill\s+me\b|\binterview\s+me\b",
+    re.IGNORECASE,
+)
+_GRILL_NEG_GUARD_RE = re.compile(
+    r"(?:别|不要|不用|无需|不必|不需要|\bdon'?t\s+|\bdo\s+not\s+|\bnever\s+|\bwithout\s+|\bnot\s+|\bno\s+)",
+    re.IGNORECASE,
+)
+_PRE_CODING_CUE_RE = re.compile(
+    r"写代码前|动手前|实现前|\bbefore\s+(?:coding|implementing|writing)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_SEP_RE = re.compile(
+    r"[,，。.;；!！?？\n]|(?<![A-Za-z0-9_])(?:then|but|however)(?![A-Za-z0-9_])|然后|但是|但|而是",
+    re.IGNORECASE,
+)
+_WITHOUT_INFINITIVE_BINDER_RE = re.compile(
+    r"\b(?:"
+    r"both\b"
+    r"|letting\b"
+    r"|(?:making|having|helping)\b.{0,40}\b(?:start|stop|run|build|test|try|retry|restart|resume|loop|fail|pass|execute|iterate|keep|wait|crash|hang)\b(?:\s+(?:up|away|again|now|early|twice|[a-z]+ly)){0,2}$"
+    r"|(?:trying|attempting|starting|wanting|needing)\s+to\b"
+    r"|to\s+(?:start|stop|run|build|test|try|loop|fail|pass|execute|iterate|keep|verify|finish)\b"
+    r")",
+    re.IGNORECASE,
+)
+_WITHOUT_CLAUSE_BREAK_RE = re.compile(
+    r"\bwithout\b.*\band\s+(?="
+    r"(?:please\s+)?(?:"
+    r"run|iterate|execute|continue|proceed|carry\s+on|verify|keep|stay|finish|complete"
+    r"|re-?run|loop(?=\s+(?:until|overnight|unattended)\b)"
+    r"|let(?:'s|\s+it)?|leave\s+it"
+    r")\b)",
+    re.IGNORECASE,
+)
+_TRAILING_WITHOUT_AND_RE = re.compile(r"\bwithout\b.*\band\s*$", re.IGNORECASE)
+_MATCH_IMPERATIVE_CONT_RE = re.compile(
+    r"(?:don'?t\s+stop\b|do\s+not\s+stop\b|never\s+stop\b|keep\s+(?:iterating|running|trying)\b|grill\s+me\b|interview\s+me\b)",
+    re.IGNORECASE,
+)
+
+
+def _strip_terminated_without(clause: str, pat: re.Pattern[str]) -> str:
+    m = pat.search(clause)
+    if not m:
+        return clause
+    without_tail = re.split(r"\bwithout\b", m.group(0), flags=re.IGNORECASE)[-1]
+    inner_body = re.sub(r"\band\s*$", "", without_tail, flags=re.IGNORECASE).strip()
+    if _WITHOUT_INFINITIVE_BINDER_RE.search(inner_body):
+        return clause
+    return clause[: m.start()] + " " + clause[m.end() :]
+
+
+def _preceding_clause_window(text: str, pos: int, width: int = 80) -> str:
+    clause = _CLAUSE_SEP_RE.split(text[max(0, pos - width) : pos])[-1]
+    clause = _strip_terminated_without(clause, _WITHOUT_CLAUSE_BREAK_RE)
+    if _MATCH_IMPERATIVE_CONT_RE.match(text[pos : pos + 32]):
+        clause = _strip_terminated_without(clause, _TRAILING_WITHOUT_AND_RE)
+    return clause
+
+
+_INLINE_LITERAL_SPAN_RE = re.compile(
+    r'`[^`\n]+?`|"[^"\n]+?"|(?<![A-Za-z0-9])\'[^\'\n]+?\'(?![A-Za-z0-9])'
+    r"|“[^”\n]+?”|‘[^’\n]+?’|「[^」\n]+?」|『[^』\n]+?』|《[^》\n]+?》"
+)
+_PATH_TOKEN_SPAN_RE = re.compile(
+    r"@\[[^\[\]\r\n]+\]"
+    r"|(?:[a-z0-9_.-]+/)+[a-z0-9_.-]+"
+    r"|\b[a-z0-9_-]+\.(?:py|pyw|js|jsx|ts|tsx|mjs|cjs|md|txt|json|ya?ml|toml|ini|cfg|conf|sh|zsh|bash|html|css|scss|sql|log|csv|xml|go|rs|rb|java|c|cpp|h|hpp|lock)\b",
+    re.IGNORECASE,
+)
+_FEATURE_UI_AFTER_RE = re.compile(
+    r"^\s*(?:模式|状态|功能|模块|组件|接口|逻辑|字段|参数|属性|开关|选项|配置|设置|页面|界面|弹窗|按钮|标签|文案|拼写|字样|提示语|提示框|报告|摘要|任务名"
+    r"|(?:modes?|states?|features?|modules?|components?|services?|handlers?|endpoints?|apis?|fields?|param(?:eter)?s?|flags?|toggles?|switch(?:es)?|settings?|config(?:uration)?s?|options?"
+    r"|pages?|ui|screens?|views?|dialogs?|modals?|buttons?|labels?|copy|texts?|strings?|typos?|spellings?|tooltips?|placeholders?|titles?|links?|icons?|menus?"
+    r"|reports?|summar(?:y|ies)|digests?|backups?|crons?|schedules?|jobs?|emails?|alerts?|notices?|notifications?|headers?|footers?|subjects?|headlines?|captions?)\b)",
+    re.IGNORECASE,
+)
+_EXEC_MANNER_ZH_BEFORE_RE = re.compile(r"(?:^|[并，,])\s*请?(?:以|用|按|采用|使用|开启|启用)\s*$")
+_EXEC_MANNER_ZH_AFTER_RE = re.compile(
+    r"^\s*模式\s*(?:下\s*)?(?:来|去|继续|持续)?(?:运行|跑通?|执行|测试|验证|排查|修复|重构|迭代|推进|完成)",
+    re.IGNORECASE,
+)
+_EXEC_MANNER_ZH_MODIFIER_AFTER_RE = re.compile(
+    r"^\s*模式\s*(?:下\s*)?(?:(?:运行|执行|跑|测试|工作)?(?:时|中|后)?的|(?:运行|执行)(?:报错|错误|异常|崩溃|失败|超时))",
+    re.IGNORECASE,
+)
+_LIST_MARKER_PREFIX_RE = re.compile(r"^(?:\s*(?:[-*•>]+|\d+[.)、]))+\s*")
+_EXEC_MANNER_EN_INF_NEG_RE = re.compile(
+    r"\b(?:fails?|failed|failing|unable|refuses?|refused|tries|tried|trying|struggles?|struggling)\s+to\b",
+    re.IGNORECASE,
+)
+_EXEC_MANNER_EN_BEFORE_RE = re.compile(
+    r"(?:^|\band\s+)(?:please\s+|just\s+|also\s+)?(?:run|execute|iterate|verify|re-?run|keep\s+running)\b[^,，。.;；!！?？\n]{0,40}\b(?:in|with|using|under)\s+$",
+    re.IGNORECASE,
+)
+_EXEC_MANNER_EN_AFTER_RE = re.compile(
+    r"^\s*mode\s*(?:,\s*)?(?:to\s+)?(?:run|execute|iterate|verify|re-?run|keep\s+running)\b",
+    re.IGNORECASE,
+)
+_LITERAL_EDIT_BEFORE_RE = re.compile(
+    r"(?:spelling\s+of|typo\s+in|wording\s+of|rename|called|named|titled|labe(?:l|ll)ed"
+    r"|(?:button|label|text|string|copy|title)\s+(?:for|of|to)?"
+    r"|拼写|字样|文案为|标题为|命名为|叫做|名为)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_literal_or_feature_cue(text: str, start: int, end: int) -> bool:
+    for qm in _INLINE_LITERAL_SPAN_RE.finditer(text):
+        if (qm.start() > 0 or qm.end() < len(text)) and qm.start() <= start and end <= qm.end():
+            return True
+    for pm in _PATH_TOKEN_SPAN_RE.finditer(text):
+        if pm.start() <= start and end <= pm.end():
+            return True
+    after_slice = text[end : end + 36]
+    if _FEATURE_UI_AFTER_RE.match(after_slice):
+        before_clause = _CLAUSE_SEP_RE.split(text[max(0, start - 60) : start])[-1]
+        before_clean = _LIST_MARKER_PREFIX_RE.sub("", _INLINE_LITERAL_SPAN_RE.sub(" ", before_clause).lstrip()).lstrip()
+        en_before_m = (
+            _EXEC_MANNER_EN_BEFORE_RE.search(before_clean)
+            if re.match(r"^\s*mode\b", after_slice, re.IGNORECASE)
+            else None
+        )
+        en_before_ok = bool(en_before_m) and (
+            bool(re.match(r"and\s+please\b", en_before_m.group(0), re.IGNORECASE))
+            or not _EXEC_MANNER_EN_INF_NEG_RE.search(before_clean[: en_before_m.start()])
+        )
+        is_exec_manner = (
+            (
+                bool(_EXEC_MANNER_ZH_BEFORE_RE.search(before_clean))
+                and bool(_EXEC_MANNER_ZH_AFTER_RE.match(after_slice))
+                and not _EXEC_MANNER_ZH_MODIFIER_AFTER_RE.match(after_slice)
+            )
+            or en_before_ok
+            or (
+                bool(_EXEC_MANNER_EN_AFTER_RE.match(after_slice))
+                and not re.search(r"\b(?:fix|debug|patch|bug|error|crash|typo)\b", before_clean, re.IGNORECASE)
+            )
+        )
+        if not is_exec_manner:
+            return True
+    return bool(_LITERAL_EDIT_BEFORE_RE.search(text[max(0, start - 28) : start]))
+
 _TOOL_REASONS = {
     "/run-workflow": "任务包含多条目遍历/批量扇出与结构化汇总特征，适合用脚本确定性并行编排",
     "/boost": "任务涉及深层根因排查、复杂并发或高强度严密验证，适合单任务纵深增强",
     "/swarm": "任务可拆分为多路并行模块且需要互审/交叉验证，适合多 Worker 消息板协同",
     "/teamwork": "任务属于从零到一或端到端完整项目交付，适合交由自治团队全流程推进",
+    "/goal": "任务要求无人值守/过夜持续闭环迭代直至全部验收通过，适合持久目标循环",
+    "/grill-me": "任务需要在编码前通过多轮交互式追问把需求、边界与设计歧义问透",
 }
 
 
@@ -1961,14 +2125,32 @@ def _normalize_tool_token(tok: str) -> str | None:
         "boost": "/boost",
         "swarm": "/swarm",
         "teamwork": "/teamwork",
+        "goal": "/goal",
+        "grill-me": "/grill-me",
     }.get(cleaned)
+
+
+def _is_unslashed_goal_noun(
+    raw_tok: str,
+    after_window: str,
+    *,
+    strict_adopt: bool,
+    preceding_char: str = "",
+) -> bool:
+    if raw_tok.startswith("/") or _normalize_tool_token(raw_tok) != "/goal":
+        return False
+    if strict_adopt:
+        return not bool(_GOAL_ADOPT_SUFFIX_RE.match(after_window))
+    if preceding_char == "`" and not _GOAL_ADOPT_SUFFIX_RE.match(after_window):
+        return True
+    return bool(_GOAL_NON_TOOL_NOUN_RE.match(after_window))
 
 
 def recommend_execution_tool(
     raw_prompt: str,
     workspace_ctx: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Conservatively recommend `/run-workflow`, `/boost`, `/swarm`, `/teamwork`, or `none`."""
+    """Conservatively recommend `/run-workflow`, `/boost`, `/swarm`, `/teamwork`, `/goal`, `/grill-me`, or `none`."""
     default_res = {
         "tool": "none",
         "execution_scope": "in_session",
@@ -1992,15 +2174,30 @@ def recommend_execution_tool(
 
     negated: set[str] = set()
     for nm in _PER_TOOL_NEG_RE.finditer(low):
-        for raw_tok in _TOOL_NAME_RE.findall(nm.group(0)):
+        for tm in _TOOL_NAME_RE.finditer(nm.group(0)):
+            raw_tok = tm.group(0)
             norm = _normalize_tool_token(raw_tok)
-            if norm:
-                negated.add(norm)
+            if not norm:
+                continue
+            abs_start = nm.start() + tm.start()
+            prev_ch = low[abs_start - 1] if abs_start > 0 else ""
+            after_tok = low[nm.start() + tm.end() : nm.start() + tm.end() + 20].lstrip("`'\"」』）)")
+            if _is_unslashed_goal_noun(raw_tok, after_tok, strict_adopt=False, preceding_char=prev_ch):
+                continue
+            negated.add(norm)
 
     mentioned_non_negated: set[str] = set()
+    has_credible_tool_mention = False
     for tm in _TOOL_NAME_RE.finditer(low):
-        norm = _normalize_tool_token(tm.group(0))
-        if norm and norm not in negated:
+        raw_tok = tm.group(0)
+        norm = _normalize_tool_token(raw_tok)
+        if not norm:
+            continue
+        after_tok = low[tm.end() : tm.end() + 20].lstrip("`'\"」』）)")
+        if _is_unslashed_goal_noun(raw_tok, after_tok, strict_adopt=True):
+            continue
+        has_credible_tool_mention = True
+        if norm not in negated:
             mentioned_non_negated.add(norm)
 
     explicit_tools: set[str] = set()
@@ -2025,16 +2222,25 @@ def recommend_execution_tool(
         if not raw_tok.startswith("/") and norm != "/run-workflow":
             if em.group(0)[0].isascii():
                 continue
-            after_window = low[em.end() : em.end() + 16]
-            if re.match(r"^\s*(?:::|库|图|library|libs?\b|plot|chart|\d)", after_window):
+            after_window = low[em.end() : em.end() + 20].lstrip("`'\"」』）)")
+            if norm == "/goal":
+                if not _GOAL_ADOPT_SUFFIX_RE.match(after_window):
+                    continue
+            elif re.match(r"^\s*(?:::|库|图|library|libs?\b|plot|chart|\d)", after_window):
                 continue
         prefix_window = low[max(0, pos - 16) : pos]
         if _EXPLICIT_ADOPT_NEG_PREFIX_RE.search(prefix_window):
             continue
         explicit_tools.add(norm)
 
-    is_meta_qa = bool(_META_QA_RE.search(low)) and bool(_TOOL_NAME_RE.search(low))
-    tool_is_meta_subject = bool(_TOOL_AS_META_SUBJECT_RE.search(low))
+    is_meta_qa = bool(_META_QA_RE.search(low)) and has_credible_tool_mention
+    tool_is_meta_subject = False
+    for msub in _TOOL_AS_META_SUBJECT_RE.finditer(low):
+        raw_tok = msub.group(1)
+        after_tok = low[msub.end(1) : msub.end(1) + 20].lstrip("`'\"」』）)")
+        if not _is_unslashed_goal_noun(raw_tok, after_tok, strict_adopt=True):
+            tool_is_meta_subject = True
+            break
     is_comparative_multi = len(mentioned_non_negated) >= 2 and bool(_COMPARATIVE_RE.search(low))
     if tool_is_meta_subject or (is_meta_qa and (not explicit_tools or is_comparative_multi)):
         return {
@@ -2055,7 +2261,14 @@ def recommend_execution_tool(
             "signals": ["explicit_request"],
         }
 
-    scores: dict[str, int] = {"/run-workflow": 0, "/boost": 0, "/swarm": 0, "/teamwork": 0}
+    scores: dict[str, int] = {
+        "/run-workflow": 0,
+        "/boost": 0,
+        "/swarm": 0,
+        "/teamwork": 0,
+        "/goal": 0,
+        "/grill-me": 0,
+    }
     sig_map: dict[str, list[str]] = {k: [] for k in scores}
 
     mentioned_paths = (workspace_ctx or {}).get("mentioned_paths") or []
@@ -2139,9 +2352,34 @@ def recommend_execution_tool(
         scores["/boost"] += 2
         sig_map["/boost"].append("high_depth_rigor")
 
+    # /goal signals
+    goal_cues: set[str] = set()
+    for gm in _GOAL_LOOP_RE.finditer(low):
+        if _is_literal_or_feature_cue(low, gm.start(), gm.end()):
+            continue
+        if _GOAL_NEG_GUARD_RE.search(_preceding_clause_window(low, gm.start())):
+            continue
+        goal_cues.add(" ".join(gm.group(0).strip().split()))
+    if goal_cues:
+        scores["/goal"] += 4 if len(goal_cues) >= 2 else 3
+        sig_map["/goal"].append("persistent_goal_loop")
+
+    # /grill-me signals
+    has_grill_cue = False
+    for grm in _GRILL_ME_RE.finditer(low):
+        if _is_literal_or_feature_cue(low, grm.start(), grm.end()):
+            continue
+        if _GRILL_NEG_GUARD_RE.search(_preceding_clause_window(low, grm.start())):
+            continue
+        has_grill_cue = True
+        break
+    if has_grill_cue:
+        scores["/grill-me"] += 4 if _PRE_CODING_CUE_RE.search(low) else 3
+        sig_map["/grill-me"].append("design_interview")
+
     best_tool: str | None = None
     best_score = 0
-    for candidate in ("/run-workflow", "/boost", "/swarm", "/teamwork"):
+    for candidate in ("/run-workflow", "/boost", "/swarm", "/teamwork", "/goal", "/grill-me"):
         if candidate in negated:
             continue
         sc = scores[candidate]
@@ -2261,6 +2499,8 @@ def render_enhancement_packet(
                 "- `/boost` (host `/` cmd): deep single-task root-cause, concurrency, or complex/security algo.",
                 "- `/swarm` (host `/` cmd): parallel multi-module + board/verifier cross-check (quota-heavy; distinct files).",
                 "- `/teamwork` (host `/` cmd): autonomous 0->1 end-to-end delivery.",
+                "- `/goal` (host `/` cmd): unattended/overnight persistent loop until all checks pass.",
+                "- `/grill-me` (host `/` cmd): pre-coding interactive interview to resolve design/edge ambiguities.",
                 f"- Heuristic hint (overridable): tool={tool_rec['tool']} (confidence={tool_rec['confidence']}, scope={tool_rec['execution_scope']}) — {tool_rec['reason']}",
                 "- Fence line 1: if choice != `none`, start with `/<cmd> <headline>` (no dup); else NO leading `/`.",
                 "- Outside-fence bullet: `执行工具建议：<tool 或 不选（常规直跑）> — <一句话选型理由与权衡>`.",
@@ -2272,17 +2512,23 @@ def render_enhancement_packet(
             "and omit `执行工具建议`."
         )
 
+    soft_handoff = (
+        'If `next_step_publish` MCP tool is available in session, call '
+        '`next_step_publish(next_action=..., suggested_prompt=..., actor="user", waiting_on_user=True)` '
+        "with the finalized prompt before stopping (skip silently if unavailable)."
+    )
+
     if routing_mode == "auto":
         if match.mode == "only":
             mode_rule = (
                 "MODE=only: Output ONLY fenced prompt (obey Fence line 1) + 3-5 changelog/assumptions & routing bullets, "
-                "then STOP. NEVER edit files or run the task."
+                f"then STOP. {soft_handoff} NEVER edit files or run the task."
             )
         elif match.mode == "execute":
             mode_rule = (
                 "MODE=execute: Briefly state spec/assumptions & tool choice; call `ask_question` (1-3 choices) ONLY for "
                 "dangerous/irreversible ambiguity. Execute: `none` -> run in-session; `/run-workflow` -> load `run-workflow` skill & "
-                "call `run_workflow`; `/boost`/`/swarm`/`/teamwork` -> note in 1 line that host `/` input is needed to trigger them, "
+                "call `run_workflow`; `/boost`/`/swarm`/`/teamwork`/`/goal`/`/grill-me` -> note in 1 line that host `/` input is needed to trigger them, "
                 "and run spec directly in-session (NEVER call `swarm` tool unprompted)."
             )
         else:
@@ -2298,17 +2544,18 @@ def render_enhancement_packet(
                 "  2. `仅保留带 /run-workflow 前缀的优化稿（方便复制手动发送）`\n"
                 "  3. `不启用 /run-workflow，改为在当前会话常规直跑`\n"
                 "  4. `按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）`\n"
-                "- `/boost`/`/swarm`/`/teamwork` (host slash cmd; cannot self-start mid-turn; substitute `<cmd>`):\n"
+                "- `/boost`/`/swarm`/`/teamwork`/`/goal`/`/grill-me` (host slash cmd; cannot self-start mid-turn; substitute `<cmd>`):\n"
                 "  1. `(Recommended) 保留带 /<cmd> 前缀的优化稿并结束本轮（复制发送即可激活 /<cmd>）`\n"
                 "  2. `不启用 /<cmd>，直接在当前会话按优化稿常规执行`\n"
                 "  3. `按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）`\n"
+                f"When user keeps `/<cmd>` (or keep-only) and stops: {soft_handoff}\n"
                 "(Plan Mode: confirm before proceeding; `/run-workflow` loads `run-workflow` skill; NEVER call `swarm` tool unprompted.)"
             )
     else:
         if match.mode == "only":
             mode_rule = (
                 "MODE=only: Output ONLY fenced prompt + 3-5 changelog/assumptions bullets, "
-                "then STOP. NEVER edit files or run the task."
+                f"then STOP. {soft_handoff} NEVER edit files or run the task."
             )
         elif match.mode == "execute":
             mode_rule = (
@@ -2322,6 +2569,7 @@ def render_enhancement_packet(
                 "  1. `(Recommended) 直接按优化后的指令执行`\n"
                 "  2. `仅保留优化稿（不执行，方便复制使用）`\n"
                 "  3. `按补充意见微调优化稿（可在下方自定义输入栏直接填写修改点）`\n"
+                f"When user chooses keep-only & stops: {soft_handoff}\n"
                 "(Plan Mode: confirm before proceeding.)"
             )
 

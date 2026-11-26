@@ -3381,6 +3381,289 @@ class PromptForgeTests(unittest.TestCase):
         self.assertIn("NO leading `/` command prefix", pkt_off)
         self.assertIn("执行工具建议", pkt_off)
 
+    # 8. v0.6.0 /goal & /grill-me Routing, False-Positive Guards & Zero-Coupling Soft Handoff
+    def test_v060_goal_grill_me_routing_guards_and_packet_handoff(self) -> None:
+        # Constants & RESERVED_TEMPLATE_IDS contract
+        self.assertEqual(
+            core.EXECUTION_TOOLS,
+            ("none", "/run-workflow", "/boost", "/swarm", "/teamwork", "/goal", "/grill-me"),
+        )
+        self.assertEqual(
+            core.HOST_SLASH_TOOLS,
+            ("/boost", "/swarm", "/teamwork", "/goal", "/grill-me"),
+        )
+        self.assertEqual(core.IN_SESSION_TOOLS, ("none", "/run-workflow"))
+        self.assertEqual(
+            core.RESERVED_TEMPLATE_IDS,
+            {"only", "copy", "draft", "go", "run", "prefs", "auto", "notool", "direct", "autotool"},
+        )
+        self.assertNotIn("goal", core.RESERVED_TEMPLATE_IDS)
+        self.assertNotIn("grill-me", core.RESERVED_TEMPLATE_IDS)
+
+        manifest = json.loads((PLUGIN_ROOT / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["version"], "0.6.0")
+        self.assertIn("/goal", manifest["description"])
+        self.assertIn("/grill-me", manifest["description"])
+
+        # Explicit slashed & Chinese-qualified /goal and /grill-me adoption
+        for prompt_text, expected_tool in (
+            ("用 /goal 修复并跑通所有单测", "/goal"),
+            ("use /goal to fix auth tests", "/goal"),
+            ("用 goal 模式过夜跑通所有测试", "/goal"),
+            ("使用 goal 指令修复全部失败用例", "/goal"),
+            ("用 /grill-me 深入访谈架构边界", "/grill-me"),
+            ("use /grill-me before coding auth module", "/grill-me"),
+            ("用 grill-me 问透需求细节", "/grill-me"),
+            ("用 /boost 分析 goal 字段和 status 字段的区别", "/boost"),
+            ("用 /grill-me 深入分析两种架构的区别", "/grill-me"),
+        ):
+            rec = core.recommend_execution_tool(prompt_text)
+            self.assertEqual(rec["tool"], expected_tool, f"Failed for {prompt_text!r}: {rec}")
+            self.assertEqual(rec["execution_scope"], "host_slash")
+            self.assertIn("explicit_request", rec["signals"])
+
+        # Heuristic /goal and /grill-me triggers (medium vs high)
+        rec_goal_med = core.recommend_execution_tool("过夜跑通全部测试并验证修复")
+        self.assertEqual(rec_goal_med["tool"], "/goal")
+        self.assertEqual(rec_goal_med["confidence"], "medium")
+        self.assertIn("persistent_goal_loop", rec_goal_med["signals"])
+
+        rec_goal_high = core.recommend_execution_tool("无人值守通宵迭代直到全部测试通过才停")
+        self.assertEqual(rec_goal_high["tool"], "/goal")
+        self.assertEqual(rec_goal_high["confidence"], "high")
+        self.assertIn("persistent_goal_loop", rec_goal_high["signals"])
+
+        rec_goal_pos_dont = core.recommend_execution_tool("不要停，直到全部测试通过才停")
+        self.assertEqual(rec_goal_pos_dont["tool"], "/goal")
+        rec_goal_zh_all = core.recommend_execution_tool("修复测试，直到全部通过才停")
+        self.assertEqual(rec_goal_zh_all["tool"], "/goal")
+
+        rec_goal_en = core.recommend_execution_tool("keep iterating until all tests pass")
+        self.assertEqual(rec_goal_en["tool"], "/goal")
+
+        rec_goal_en_dont = core.recommend_execution_tool("do not stop until all checks pass")
+        self.assertEqual(rec_goal_en_dont["tool"], "/goal")
+        rec_goal_en_never = core.recommend_execution_tool("never stop until all checks pass")
+        self.assertEqual(rec_goal_en_never["tool"], "/goal")
+        rec_goal_without_and = core.recommend_execution_tool("refactor auth without breaking schema and run overnight")
+        self.assertEqual(rec_goal_without_and["tool"], "/goal")
+        rec_goal_without_unit_and_run = core.recommend_execution_tool(
+            "Fix this without touching unit and integration tests and run overnight."
+        )
+        self.assertEqual(rec_goal_without_unit_and_run["tool"], "/goal")
+        rec_goal_without_and_dont_stop = core.recommend_execution_tool(
+            "Refactor auth without breaking tokens and don't stop until all tests pass."
+        )
+        self.assertEqual(rec_goal_without_and_dont_stop["tool"], "/goal")
+        rec_goal_without_and_run_scripts = core.recommend_execution_tool(
+            "Refactor auth without breaking schema and run scripts overnight."
+        )
+        self.assertEqual(rec_goal_without_and_run_scripts["tool"], "/goal")
+        rec_goal_without_making_changes = core.recommend_execution_tool(
+            "Refactor auth without making schema changes and run scripts overnight."
+        )
+        self.assertEqual(rec_goal_without_making_changes["tool"], "/goal")
+        rec_goal_unattended_run = core.recommend_execution_tool("无人值守运行测试")
+        self.assertEqual(rec_goal_unattended_run["tool"], "/goal")
+        rec_goal_unattended_zh_mode = core.recommend_execution_tool("请以无人值守模式运行全部测试。")
+        self.assertEqual(rec_goal_unattended_zh_mode["tool"], "/goal")
+        rec_goal_unattended_en_mode = core.recommend_execution_tool("Run all tests in unattended mode.")
+        self.assertEqual(rec_goal_unattended_en_mode["tool"], "/goal")
+        rec_goal_bullet_en = core.recommend_execution_tool("- Run all tests in unattended mode.")
+        self.assertEqual(rec_goal_bullet_en["tool"], "/goal")
+        rec_goal_bullet_zh = core.recommend_execution_tool("- 请以无人值守模式运行全部测试。")
+        self.assertEqual(rec_goal_bullet_zh["tool"], "/goal")
+        rec_goal_fix_and_run_unattended = core.recommend_execution_tool(
+            "Fix the bug and run all tests in unattended mode."
+        )
+        self.assertEqual(rec_goal_fix_and_run_unattended["tool"], "/goal")
+        rec_goal_fix_and_zh_unattended = core.recommend_execution_tool(
+            "修复该问题并用无人值守模式运行全部测试。"
+        )
+        self.assertEqual(rec_goal_fix_and_zh_unattended["tool"], "/goal")
+        rec_goal_fail_to_please_run = core.recommend_execution_tool(
+            "Fix tests that fail to compile and please run the full suite in unattended mode."
+        )
+        self.assertEqual(rec_goal_fail_to_please_run["tool"], "/goal")
+        rec_goal_fail_noun_please_run = core.recommend_execution_tool(
+            "Fix tests that fail compilation and please run the full suite in unattended mode."
+        )
+        self.assertEqual(rec_goal_fail_noun_please_run["tool"], "/goal")
+        rec_goal_script_then_overnight = core.recommend_execution_tool(
+            "Fix scripts/report.py and run all tests overnight."
+        )
+        self.assertEqual(rec_goal_script_then_overnight["tool"], "/goal")
+
+        rec_grill_med = core.recommend_execution_tool("先问我几个问题，把需求细节问透")
+        self.assertEqual(rec_grill_med["tool"], "/grill-me")
+        self.assertEqual(rec_grill_med["confidence"], "medium")
+        self.assertIn("design_interview", rec_grill_med["signals"])
+
+        rec_grill_high = core.recommend_execution_tool("写代码前先问我几轮问题，把架构边界问透再动手")
+        self.assertEqual(rec_grill_high["tool"], "/grill-me")
+        self.assertEqual(rec_grill_high["confidence"], "high")
+        self.assertIn("design_interview", rec_grill_high["signals"])
+
+        rec_grill_en = core.recommend_execution_tool("before coding, grill me on API boundaries")
+        self.assertEqual(rec_grill_en["tool"], "/grill-me")
+        self.assertEqual(rec_grill_en["confidence"], "high")
+        rec_grill_plain = core.recommend_execution_tool("Grill me before coding.")
+        self.assertEqual(rec_grill_plain["tool"], "/grill-me")
+
+        # False-positive guards on bare "goal", negated cues, feature nouns, quoted UI copy, per-tool negation, meta-Q&A, & excluded cmds
+        for stay_none in (
+            "the goal is to fix the auth bug",
+            "with goal of reducing startup latency",
+            "use goal tracker to log weekly KPIs",
+            "使用 goal 字段统计指标",
+            "用 goal 参数控制分页",
+            "使用 `goal` 字段返回目标值",
+            "修复无人值守模式的登录报错。",
+            "修复使用无人值守模式运行时的登录报错。",
+            "Fix login bug in unattended mode.",
+            "Fix the tests that fail to run in unattended mode.",
+            "Fix the tests that fail to build or run in unattended mode.",
+            "Fix the tests that fail to build and run in unattended mode.",
+            "Fix the bug where workers fail to prompt and just run in unattended mode.",
+            "Fix the bug where workers fail to prompt and also run in unattended mode.",
+            'Fix the "Run" button in unattended mode.',
+            "Fix the syntax error in scripts/overnight.py.",
+            "Fix the syntax error in `scripts/overnight.py`.",
+            "Fix the typo in the overnight report title.",
+            "Fix the typo in the overnight report.",
+            "Fix the typo in the overnight reports.",
+            "Fix the headings in the overnight summaries.",
+            "Fix the label on the unattended switch.",
+            "Fix the label on the unattended switches.",
+            'Fix the spelling of "grill me" in the button label.',
+            "Update the grill me button label.",
+            'Change the dialog text to "Backup failed. The unattended job could not finish."',
+            'Change the dialog text to "Backup failed. The unattended job could not finish before the connection closed."',
+            "不用过夜，直接修一下单测",
+            "不要直到全部通过才停",
+            "直到明天才停",
+            "无需通宵，先修核心报错",
+            "don't run overnight, just fix the typo",
+            "Do not run the tests overnight.",
+            "Do not run unit and integration tests overnight.",
+            "Never run overnight.",
+            "Don't leave tests running overnight.",
+            "without unattended retries, patch parser",
+            "Fix this without running tests overnight.",
+            "Fix this without running unit and integration tests overnight.",
+            "Fix this without changing A and running tests overnight.",
+            "Fix this without breaking unit and integration tests and without stopping overnight.",
+            "Fix this without letting the tests both start and run overnight.",
+            "Fix this without letting the tests both start and keep running until all checks pass.",
+            "Fix this without making the worker start and run overnight.",
+            "Fix this without making the worker start automatically and run overnight.",
+            "Fix this without trying to build and run overnight.",
+            "Refactor auth without breaking schema and run tests without running overnight.",
+            "别问我问题，直接改代码",
+            "别先问我问题，直接改代码",
+            "don't grill me, just fix it",
+            "Never grill me before coding.",
+            "Do not repeatedly interview me before coding.",
+            "不用 /goal，通宵跑通所有测试",
+            "不要用 /goal",
+            "不用/grill-me",
+            "不要用/grill-me，先问我几个问题再写",
+            "/goal 和 /boost 有什么区别",
+            "怎么用 /grill-me？",
+            "/goal 怎么用？",
+            "goal 模式怎么用？",
+            "`goal` 字段是什么？",
+            "用 /plan 先出方案",
+            "用 /compact 压缩上下文",
+            "用 /learn 总结本次经验",
+            "用 /browser 打开页面",
+            "用 /schedule 设置定时任务",
+        ):
+            rec_none = core.recommend_execution_tool(stay_none)
+            self.assertEqual(rec_none["tool"], "none", f"Expected none for {stay_none!r}, got {rec_none}")
+
+        # Bare "goal" + "what is" must NOT suppress real heuristics via false meta_qa
+        rec_goal_boost = core.recommend_execution_tool(
+            "The goal is to find what is causing the deadlock and do rigorous verification"
+        )
+        self.assertEqual(rec_goal_boost["tool"], "/boost")
+
+        # Negated code-noun (plain or backticked) or prior-clause negation must NOT suppress genuine loop/interview cues
+        rec_goal_field_neg = core.recommend_execution_tool("不用 goal 字段，过夜跑通所有测试")
+        self.assertEqual(rec_goal_field_neg["tool"], "/goal")
+        rec_goal_backtick_field_neg = core.recommend_execution_tool("不用 `goal` 字段，过夜跑通所有测试")
+        self.assertEqual(rec_goal_backtick_field_neg["tool"], "/goal")
+        rec_goal_backtick_attr_neg = core.recommend_execution_tool("不用 `goal` 这个属性，过夜跑通所有测试")
+        self.assertEqual(rec_goal_backtick_attr_neg["tool"], "/goal")
+        rec_grill_prior_clause_neg = core.recommend_execution_tool("别用旧方案，写代码前先问我几个问题")
+        self.assertEqual(rec_grill_prior_clause_neg["tool"], "/grill-me")
+
+        # ++ /goal ... and ++only /grill-me ... parse & render cleanly
+        m_goal = core.parse_trigger("++ /goal 修完所有单测直到全绿")
+        assert m_goal is not None
+        self.assertEqual((m_goal.mode, m_goal.scenario, m_goal.raw_prompt), ("confirm", "auto", "/goal 修完所有单测直到全绿"))
+
+        m_grill = core.parse_trigger("++only /grill-me 梳理插件边界与风控")
+        assert m_grill is not None
+        self.assertEqual((m_grill.mode, m_grill.scenario, m_grill.raw_prompt), ("only", "auto", "/grill-me 梳理插件边界与风控"))
+
+        templates = core.load_all_templates()
+        ws_ctx = {"workspace_name": "repo", "snapshot_text": "Workspace: repo"}
+        prefs_auto = {**core.load_preferences(), "tool_routing": "auto"}
+
+        pkt_goal_confirm, _ = core.render_enhancement_packet(
+            m_goal, templates=templates, preferences=prefs_auto, workspace_ctx=ws_ctx
+        )
+        self.assertIn("- `/goal` (host `/` cmd):", pkt_goal_confirm)
+        self.assertIn("- `/grill-me` (host `/` cmd):", pkt_goal_confirm)
+        self.assertIn("tool=/goal", pkt_goal_confirm)
+        self.assertIn("/boost`/`/swarm`/`/teamwork`/`/goal`/`/grill-me`", pkt_goal_confirm)
+        self.assertIn("next_step_publish(next_action=..., suggested_prompt=..., actor=\"user\", waiting_on_user=True)", pkt_goal_confirm)
+        self.assertIn("保留带 /<cmd> 前缀的优化稿并结束本轮（复制发送即可激活 /<cmd>）", pkt_goal_confirm)
+
+        pkt_grill_only, _ = core.render_enhancement_packet(
+            m_grill, templates=templates, preferences=prefs_auto, workspace_ctx=ws_ctx
+        )
+        self.assertIn("tool=/grill-me", pkt_grill_only)
+        self.assertIn("next_step_publish(next_action=...,", pkt_grill_only)
+
+        m_goal_exec = core.parse_trigger("++go /goal 修完所有单测")
+        assert m_goal_exec is not None
+        pkt_goal_exec, _ = core.render_enhancement_packet(
+            m_goal_exec, templates=templates, preferences=prefs_auto, workspace_ctx=ws_ctx
+        )
+        self.assertIn("/boost`/`/swarm`/`/teamwork`/`/goal`/`/grill-me`", pkt_goal_exec)
+
+        # routing_mode=off in MODE=only preserves soft handoff without leaking EXECUTION TOOL ROUTING
+        pkt_only_off, _ = core.render_enhancement_packet(
+            m_grill,
+            templates=templates,
+            preferences={**core.load_preferences(), "tool_routing": "off"},
+            workspace_ctx=ws_ctx,
+        )
+        self.assertNotIn("EXECUTION TOOL ROUTING", pkt_only_off)
+        self.assertIn("next_step_publish(next_action=...,", pkt_only_off)
+
+        # Rendered packet character budget assertions (fixed inputs)
+        self.assertLessEqual(len(pkt_goal_confirm), 4200)
+        self.assertLessEqual(len(pkt_grill_only), 3400)
+        self.assertLessEqual(len(pkt_goal_exec), 3400)
+        self.assertLessEqual(len(pkt_only_off), 2400)
+
+        # CLI route works for /goal and /grill-me
+        buf_route = io.StringIO()
+        with contextlib.redirect_stdout(buf_route):
+            rc_r = cli.main(["--data-dir", str(self.data_dir), "route", "--no-workspace", "--prompt", "无人值守过夜跑通全部测试"])
+        self.assertEqual(rc_r, 0)
+        self.assertEqual(json.loads(buf_route.getvalue())["tool"], "/goal")
+
+        # goal and grill-me remain usable as custom template IDs (not reserved)
+        saved_goal_tpl = core.save_custom_template("goal", {"name": "Goal Tpl", "sections": ["Objective", "Verify"]})
+        self.assertEqual(saved_goal_tpl["id"], "goal")
+        m_tpl = core.parse_trigger("++goal 检查所有用例", custom_template_ids={"goal"})
+        assert m_tpl is not None
+        self.assertEqual((m_tpl.mode, m_tpl.scenario), ("confirm", "goal"))
+
 
 if __name__ == "__main__":
     unittest.main()

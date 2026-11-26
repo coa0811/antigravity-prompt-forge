@@ -2,8 +2,8 @@
 name: prompt-forge
 description: >-
   Use when the user asks in natural language to optimize, refine, expand, or structure
-  a prompt/instruction before execution (including recommending /swarm, /teamwork,
-  /run-workflow, /boost, or direct execution), or to inspect/manage Prompt Forge
+  a prompt/instruction before execution (including recommending /run-workflow, /boost,
+  /swarm, /teamwork, /goal, /grill-me, or direct execution), or to inspect/manage Prompt Forge
   personal preferences and reusable templates.
 ---
 
@@ -26,8 +26,8 @@ Use the global symlink below for all subcommands (NEVER `./scripts/...`—`run_c
    Diagnostic: `route --workspace "<active_workspace_or_cwd>" --prompt-file -` (or `--no-workspace`).
 3. Obey returned `packet` rubric, `MODE`, and `EXECUTION TOOL ROUTING`:
    - Ground strictly in `<WORKSPACE_SNAPSHOT>` / read-only facts (NEVER fabricate paths/scripts/constraints); ask 1–3 `ask_question` MCQs before finalizing only if ambiguous.
-   - Default tool: `none` (YAGNI); follow returned prefix and `执行工具建议` summary rules. `/run-workflow` runs via `run-workflow` skill/`run_workflow` tool; `/boost`, `/swarm`, `/teamwork` are host slash commands (cannot self-start mid-turn).
-   - `only`: stop after prompt+summary (NEVER edit/mutate). `confirm`: NEVER edit/mutate before exact returned `ask_question` branch (`none`, `/run-workflow`, host slash). `execute`: run directly (note host `/` requirement for future host slash runs). NEVER call `swarm` tool unprompted.
+   - Default tool: `none` (YAGNI); follow returned prefix and `执行工具建议` summary rules. `/run-workflow` runs via `run-workflow` skill/`run_workflow` tool; `/boost`, `/swarm`, `/teamwork`, `/goal`, `/grill-me` are host slash commands (cannot self-start mid-turn).
+   - `only`: stop after prompt+summary (NEVER edit/mutate). `confirm`: NEVER edit/mutate before exact returned `ask_question` branch (`none`, `/run-workflow`, host slash). When stopping with a kept prompt (`only` or host slash/`keep-only` confirm), optionally call `next_step_publish` if available (skip silently if absent). `execute`: run directly (note host `/` requirement for future host slash runs). NEVER call `swarm` tool unprompted.
 
 ## Workflow 2: Preferences & Templates
 
